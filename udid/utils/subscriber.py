@@ -1,26 +1,24 @@
 import logging
-
 from django.db import transaction
-
 from .auth import CVClient
-
 from ..models import ListOfSubscriber
 from ..serializers import SubscriberSerializer
 
 logger = logging.getLogger(__name__)
 
-"""
-Verifica si la base de datos de suscriptores está vacía.
-"""
+
 def DataBaseEmpty():
+    """
+    Verifica si la base de datos de suscriptores está vacía.
+    """
     logger.info("Verificando si la base de datos de suscriptores está vacía...")
     return not ListOfSubscriber.objects.exists()
 
 
-"""
-Verifica el ultimo registro de suscriptores en la base de datos.
-"""
 def LastSubscriber():
+    """
+    Retorna el último suscriptor registrado según el campo 'code'.
+    """
     logger.info("Obteniendo el último suscriptor registrado...")
     try:
         return ListOfSubscriber.objects.latest('code')
@@ -29,61 +27,62 @@ def LastSubscriber():
         return None
 
 
-"""
-    Almacena los datos de los suscriptores en la base de datos.
-    Esta función procesa los datos en lotes y maneja la inserción de forma eficiente.
-    :param data_batch: Lista de diccionarios con los datos de los suscriptores.
-    :return: Tupla con el número total de suscriptores procesados y el número de suscriptores inválidos.
-"""
-def store_subscriber_data(data_batch):
-    batch_size = 500
+def store_or_update_subscribers(data_batch):
+    """
+    Inserta nuevos suscriptores o actualiza los existentes si hay cambios.
+    """
+    logger.info("Iniciando almacenamiento/actualización de suscriptores...")
     chunk_size = 100
-    total_processed = 0
+    total_new = 0
     total_invalid = 0
 
     for i in range(0, len(data_batch), chunk_size):
         chunk = data_batch[i:i + chunk_size]
-        ids = {item['code'] for item in chunk if 'code' in item}
-        existing_ids = set(ListOfSubscriber.objects.filter(
-            id__in=ids
-        ).values_list('code', flat=True))
+        codes = {item['code'] for item in chunk if 'code' in item}
+        existing = {
+            obj.code: obj for obj in ListOfSubscriber.objects.filter(code__in=codes)
+        }
 
         with transaction.atomic():
-            subscriber_objects = []
+            new_objects = []
             for item in chunk:
-                if item['code'] not in existing_ids:
-                    serializer = SubscriberSerializer(data=item)
-                    if serializer.is_valid():
-                        obj = ListOfSubscriber(**serializer.validated_data)
-                        subscriber_objects.append(obj)
-                        total_processed += 1
-                    else:
-                        logger.warning(f"Datos inválidos: {serializer.errors}")
-                        total_invalid += 1
+                serializer = SubscriberSerializer(data=item)
+                if not serializer.is_valid():
+                    logger.warning(f"Datos inválidos: {serializer.errors}")
+                    total_invalid += 1
+                    continue
 
-                if len(subscriber_objects) >= batch_size:
-                    ListOfSubscriber.objects.bulk_create(subscriber_objects, ignore_conflicts=True)
-                    logger.info(f"Insertado batch de {len(subscriber_objects)} suscriptores")
-                    subscriber_objects = []
+                validated = serializer.validated_data
+                code = validated.get('code')
 
-            if subscriber_objects:
-                ListOfSubscriber.objects.bulk_create(subscriber_objects, ignore_conflicts=True)
-                logger.info(f"Insertado último batch de {len(subscriber_objects)} suscriptores")
+                if code in existing:
+                    obj = existing[code]
+                    changed = False
+                    for key, val in validated.items():
+                        if getattr(obj, key, None) != val:
+                            setattr(obj, key, val)
+                            changed = True
+                    if changed:
+                        obj.save(update_fields=list(validated.keys()))
+                else:
+                    new_objects.append(ListOfSubscriber(**validated))
+                    total_new += 1
 
-    logger.info(f"Total procesados: {total_processed}, inválidos: {total_invalid}")
-    return total_processed, total_invalid
+            if new_objects:
+                ListOfSubscriber.objects.bulk_create(new_objects, ignore_conflicts=True)
+                logger.info(f"Insertados {len(new_objects)} nuevos suscriptores")
 
-"""
-    Obtiene y almacena los suscriptores desde la API de Panaccess.
-    :param session_id: ID de sesión para autenticar la llamada a la API.
-    :param limit: Número máximo de registros a procesar por llamada.
-    :param offset: Número de registros a saltar antes de procesar.
-    :return: Tupla con el número total de suscriptores procesados y el número de suscriptores inválidos.
-"""
-def fetch_and_store_subscribers(session_id, limit=100):
+    logger.info(f"Suscriptores procesados: nuevos={total_new}, inválidos={total_invalid}")
+    return total_new, total_invalid
+
+
+def fetch_all_subscribers(session_id, limit=100):
+    """
+    Descarga todos los suscriptores desde la API de Panaccess y los guarda.
+    """
+    logger.info("Descargando todos los suscriptores desde Panaccess...")
     offset = 0
-    total_processed = 0
-    total_invalid = 0
+    all_data = []
 
     while True:
         result = CallListSubscribers(session_id, offset, limit)
@@ -91,13 +90,10 @@ def fetch_and_store_subscribers(session_id, limit=100):
         if not rows:
             break
 
-        logger.info(f"Procesando página con offset={offset}, {len(rows)} registros")
-
-        # Procesamiento del contenido de cada row
-        data_batch = []
+        logger.info(f"Offset {offset}: {len(rows)} registros recibidos")
         for row in rows:
             try:
-                subscriber_data = {
+                all_data.append({
                     "id": row.get("id"),
                     "code": row["cell"][0],
                     "lastName": row["cell"][1],
@@ -111,25 +107,23 @@ def fetch_and_store_subscribers(session_id, limit=100):
                     "address": row["cell"][9],
                     "created": row["cell"][10],
                     "modified": row["cell"][11]
-                }
-                data_batch.append(subscriber_data)
+                })
             except Exception as e:
                 logger.warning(f"Error procesando fila: {e}")
 
-        processed, invalid = store_subscriber_data(data_batch)
-        total_processed += processed
-        total_invalid += invalid
-
         offset += limit
 
-    return total_processed, total_invalid
+    return store_or_update_subscribers(all_data)
 
 
-def fetch_subscribers_up_to(session_id, highest_id, limit=100):
+def fetch_new_subscribers(session_id, highest_code, limit=100):
+    """
+    Descarga suscriptores con códigos más altos que el último registrado.
+    """
+    logger.info("Buscando nuevos suscriptores...")
     offset = 0
-    total_processed = 0
-    total_invalid = 0
-    found_id = False
+    new_data = []
+    found = False
 
     while True:
         result = CallListSubscribers(session_id, offset, limit)
@@ -137,75 +131,90 @@ def fetch_subscribers_up_to(session_id, highest_id, limit=100):
         if not rows:
             break
 
-        filtered_data = []
-
         for row in rows:
             try:
-                if row["cell"][1] == highest_id:
-                    found_id = True
+                if row["cell"][0] == highest_code:
+                    found = True
+                    logger.info(f"Se encontró el último código registrado: {highest_code}")
                     break
-
-                subscriber_data = {
+                new_data.append({
                     "id": row["id"],
-                    "code": row["cell"][1],
-                    "lastName": row["cell"][2],
-                    "firstName": row["cell"][3],
-                    "smartcards": row["cell"][4],
-                    "hcId": row["cell"][5],
-                    "hcName": row["cell"][6],
-                    "country": row["cell"][7],
-                    "city": row["cell"][8],
-                    "zip": row["cell"][9],
-                    "address": row["cell"][10],
-                    "created": row["cell"][11],
-                    "modified": row["cell"][12]
-                }
-                filtered_data.append(subscriber_data)
+                    "code": row["cell"][0],
+                    "lastName": row["cell"][1],
+                    "firstName": row["cell"][2],
+                    "smartcards": row["cell"][3],
+                    "hcId": row["cell"][4],
+                    "hcName": row["cell"][5],
+                    "country": row["cell"][6],
+                    "city": row["cell"][7],
+                    "zip": row["cell"][8],
+                    "address": row["cell"][9],
+                    "created": row["cell"][10],
+                    "modified": row["cell"][11]
+                })
             except Exception as e:
                 logger.warning(f"Error al procesar fila: {e}")
 
-        if filtered_data:
-            logger.info(f"Procesando {len(filtered_data)} suscriptores desde offset={offset}")
-            processed, invalid = store_subscriber_data(filtered_data)
-            total_processed += processed
-            total_invalid += invalid
-
-        if found_id:
-            logger.info(f"Se encontró el suscriptor con ID {highest_id}, deteniendo la recolección.")
+        if found:
             break
-
         offset += limit
 
-    return total_processed, total_invalid
+    return store_or_update_subscribers(new_data)
 
 
-
-"""
-Llama a la API de Panaccess para obtener la lista de suscriptores.
-"""
-def CallListSubscribers(session_id, offset=0, limit=100):
-
-    client = CVClient()
-    client.session_id = session_id  # Asignar el session ID manualmente
+def sync_subscribers(limit=100):
+    """
+    Sincroniza automáticamente los suscriptores:
+    - Si la base está vacía: descarga todo.
+    - Si ya hay datos: busca nuevos y actualiza los existentes.
+    """
+    logger.info("Sincronización automática de suscriptores iniciada")
 
     try:
-        logger.info(f"Solicitando lista de suscriptores: offset={offset}, limit={limit}")
-        # Llamada a la API para obtener la lista de suscriptores
+        client = CVClient()
+        client.login()
+        session_id = client.session_id
+
+        if DataBaseEmpty():
+            logger.info("Base de datos vacía: descarga total de suscriptores")
+            return fetch_all_subscribers(session_id, limit)
+        else:
+            last = LastSubscriber()
+            highest_code = last.code if last else None
+            logger.info("Base con datos: buscando nuevos y actualizando existentes")
+            new_result = fetch_new_subscribers(session_id, highest_code, limit)
+            all_data = fetch_all_subscribers(session_id, limit)  # forzar verificación de cambios
+            return new_result, all_data
+
+    except ConnectionError as ce:
+        logger.error(f"Error de conexión: {str(ce)}")
+    except ValueError as ve:
+        logger.error(f"Error de valor: {str(ve)}")
+    except Exception as e:
+        logger.error(f"Error inesperado durante la sincronización: {str(e)}")
+
+
+def CallListSubscribers(session_id, offset=0, limit=100):
+    """
+    Llama a la API de Panaccess para obtener la lista de suscriptores.
+    """
+    logger.info(f"Llamando API Panaccess: offset={offset}, limit={limit}")
+    client = CVClient()
+    client.session_id = session_id
+
+    try:
         response = client.call('getListOfSubscribers', {
             'offset': offset,
             'limit': limit,
-            "orderDir": "ASC",
-            "orderBy": "code"
+            'orderDir': 'ASC',
+            'orderBy': 'code'
         })
 
         if response.get('success'):
-            logger.info("Lista de suscriptores obtenida exitosamente.")
             return response.get('answer', {})
         else:
-            logger.error(f"Error al obtener la lista de suscriptores: {response.get('errorMessage', 'Sin mensaje')}")
-            raise Exception(response.get('errorMessage', 'Error al obtener la lista de suscriptores.'))
+            raise Exception(response.get('errorMessage', 'Error desconocido al obtener suscriptores'))
 
     except Exception as e:
-        logger.error(f"Error al llamar a getListOfSubscribers: {str(e)}")
-        raise Exception(f"Error al llamar a getListOfSubscribers: {str(e)}")
-
+        logger.error(f"Fallo en la llamada a getListOfSubscribers: {str(e)}")
+        raise

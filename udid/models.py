@@ -1,8 +1,8 @@
 from django.db import models
 
 class ListOfSubscriber(models.Model):
-    id = models.name = models.CharField(unique=True)
-    code = models.CharField( primary_key=True, max_length=100, blank=True, null=True, unique=True)
+    id = models.name = models.CharField(primary_key=True, unique=True)
+    code = models.CharField( max_length=100, blank=True, null=True, unique=True)
     lastName = models.CharField(max_length=100, null=True, blank=True)
     firstName = models.CharField(max_length=100, null=True, blank=True)
     smartcards = models.JSONField(null=True, blank=True)
@@ -39,6 +39,7 @@ class ListOfSmartcards(models.Model):
     lastActivation = models.DateTimeField(null=True, blank=True)
     lastContact = models.DateTimeField(null=True, blank=True)
     lastServiceListDownload = models.DateTimeField(null=True, blank=True)
+    lastActivationIP = models.CharField(max_length=100, null=True, blank=True)
     firmwareVersion = models.CharField(max_length=100, null=True, blank=True)
     camlibVersion = models.CharField(max_length=100, null=True, blank=True)
     lastApiKeyId = models.CharField(max_length=100, null=True, blank=True)
