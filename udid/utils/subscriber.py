@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 def DataBaseEmpty():
     """
-    Verifica si la base de datos de suscriptores está vacía.
+    Verifica si la tabla ListOfSubscriber está vacía.
     """
     logger.info("Verificando si la base de datos de suscriptores está vacía...")
     return not ListOfSubscriber.objects.exists()
@@ -17,13 +17,13 @@ def DataBaseEmpty():
 
 def LastSubscriber():
     """
-    Retorna el último suscriptor registrado según el campo 'code'.
+    Retorna el último suscriptor registrado en la base de datos según el campo 'code'.
     """
-    logger.info("Obteniendo el último suscriptor registrado...")
+    logger.info("Buscando el último suscriptor en la base de datos...")
     try:
         return ListOfSubscriber.objects.latest('code')
     except ListOfSubscriber.DoesNotExist:
-        logger.warning("No se encontraron suscriptores en la base de datos.")
+        logger.warning("No se encontró ningún suscriptor en la base de datos.")
         return None
 
 
@@ -78,114 +78,163 @@ def store_or_update_subscribers(data_batch):
 
 def fetch_all_subscribers(session_id, limit=100):
     """
-    Descarga todos los suscriptores desde la API de Panaccess y los guarda.
+    Descarga todos los suscriptores desde Panaccess y los almacena en la base de datos.
     """
-    logger.info("Descargando todos los suscriptores desde Panaccess...")
+    logger.info("Iniciando descarga completa de suscriptores desde Panaccess...")
     offset = 0
     all_data = []
-
     while True:
         result = CallListSubscribers(session_id, offset, limit)
         rows = result.get("rows", [])
         if not rows:
             break
-
-        logger.info(f"Offset {offset}: {len(rows)} registros recibidos")
         for row in rows:
-            try:
-                all_data.append({
-                    "id": row.get("id"),
-                    "code": row["cell"][0],
-                    "lastName": row["cell"][1],
-                    "firstName": row["cell"][2],
-                    "smartcards": row["cell"][3],
-                    "hcId": row["cell"][4],
-                    "hcName": row["cell"][5],
-                    "country": row["cell"][6],
-                    "city": row["cell"][7],
-                    "zip": row["cell"][8],
-                    "address": row["cell"][9],
-                    "created": row["cell"][10],
-                    "modified": row["cell"][11]
-                })
-            except Exception as e:
-                logger.warning(f"Error procesando fila: {e}")
-
+            all_data.append({
+                "id": row.get("id"),
+                "code": row["cell"][0],
+                "lastName": row["cell"][1],
+                "firstName": row["cell"][2],
+                "smartcards": row["cell"][3],
+                "hcId": row["cell"][4],
+                "hcName": row["cell"][5],
+                "country": row["cell"][6],
+                "city": row["cell"][7],
+                "zip": row["cell"][8],
+                "address": row["cell"][9],
+                "created": row["cell"][10],
+                "modified": row["cell"][11],
+            })
         offset += limit
+    return store_all_subscribers_in_chunks(all_data)
 
-    return store_or_update_subscribers(all_data)
-
-
-def fetch_new_subscribers(session_id, highest_code, limit=100):
+def store_all_subscribers_in_chunks(data_batch, chunk_size=100):
     """
-    Descarga suscriptores con códigos más altos que el último registrado.
+    Almacena suscriptores en la base de datos en bloques para mejorar el rendimiento.
     """
-    logger.info("Buscando nuevos suscriptores...")
+    total = len(data_batch)
+    logger.info(f"Almacenando {total} suscriptores en chunks de {chunk_size}...")
+    for i in range(0, total, chunk_size):
+        chunk = data_batch[i:i + chunk_size]
+        try:
+            registros = [ListOfSubscriber(**item) for item in chunk]
+            ListOfSubscriber.objects.bulk_create(registros, ignore_conflicts=True)
+            logger.info(f"Chunk {i//chunk_size + 1}: insertados {len(registros)} suscriptores")
+        except Exception as e:
+            logger.error(f"Error insertando chunk desde {i} hasta {i+chunk_size}: {str(e)}")
+
+
+def download_subscribers_since_last(session_id, limit=100):
+    """
+    Descarga suscriptores nuevos desde el último registrado (modo incremental).
+    """
+    logger.info("Iniciando descarga incremental de suscriptores desde Panaccess...")
+    last = LastSubscriber()
+    if not last:
+        logger.warning("No hay suscriptores registrados. Se recomienda usar descarga total.")
+        return []
+    highest_code = last.code
+    logger.info(f"Buscando suscriptores posteriores al código: {highest_code}")
     offset = 0
     new_data = []
     found = False
-
     while True:
         result = CallListSubscribers(session_id, offset, limit)
         rows = result.get("rows", [])
         if not rows:
             break
-
         for row in rows:
-            try:
-                if row["cell"][0] == highest_code:
-                    found = True
-                    logger.info(f"Se encontró el último código registrado: {highest_code}")
-                    break
-                new_data.append({
-                    "id": row["id"],
-                    "code": row["cell"][0],
-                    "lastName": row["cell"][1],
-                    "firstName": row["cell"][2],
-                    "smartcards": row["cell"][3],
-                    "hcId": row["cell"][4],
-                    "hcName": row["cell"][5],
-                    "country": row["cell"][6],
-                    "city": row["cell"][7],
-                    "zip": row["cell"][8],
-                    "address": row["cell"][9],
-                    "created": row["cell"][10],
-                    "modified": row["cell"][11]
-                })
-            except Exception as e:
-                logger.warning(f"Error al procesar fila: {e}")
-
+            code = row["cell"][0]
+            if code == highest_code:
+                found = True
+                logger.info(f"Código {highest_code} encontrado. Fin de descarga incremental.")
+                break
+            new_data.append({
+                "id": row.get("id"),
+                "code": code,
+                "lastName": row["cell"][1],
+                "firstName": row["cell"][2],
+                "smartcards": row["cell"][3],
+                "hcId": row["cell"][4],
+                "hcName": row["cell"][5],
+                "country": row["cell"][6],
+                "city": row["cell"][7],
+                "zip": row["cell"][8],
+                "address": row["cell"][9],
+                "created": row["cell"][10],
+                "modified": row["cell"][11],
+            })
         if found:
             break
         offset += limit
+    return store_all_subscribers_in_chunks(new_data)
 
-    return store_or_update_subscribers(new_data)
+
+def compare_and_update_all_subscribers(session_id, limit=100):
+    """
+    Compara todos los suscriptores de Panaccess con los de la base local y actualiza si hay diferencias.
+    """
+    logger.info("Comparando suscriptores de Panaccess con la base de datos...")
+    local_data = {
+        obj.code: obj for obj in ListOfSubscriber.objects.all()
+    }
+    offset = 0
+    total_updated = 0
+    while True:
+        response = CallListSubscribers(session_id, offset, limit)
+        remote_list = response.get("rows", [])
+        if not remote_list:
+            break
+        for row in remote_list:
+            code = row["cell"][0]
+            if not code or code not in local_data:
+                continue
+            remote = {
+                "lastName": row["cell"][1],
+                "firstName": row["cell"][2],
+                "smartcards": row["cell"][3],
+                "hcId": row["cell"][4],
+                "hcName": row["cell"][5],
+                "country": row["cell"][6],
+                "city": row["cell"][7],
+                "zip": row["cell"][8],
+                "address": row["cell"][9],
+                "created": row["cell"][10],
+                "modified": row["cell"][11],
+            }
+            local_obj = local_data[code]
+            changed_fields = []
+            for key, val in remote.items():
+                if hasattr(local_obj, key):
+                    local_val = getattr(local_obj, key)
+                    if str(local_val) != str(val):
+                        setattr(local_obj, key, val)
+                        changed_fields.append(key)
+            if changed_fields:
+                try:
+                    local_obj.save(update_fields=changed_fields)
+                    total_updated += 1
+                    logger.debug(f"Código {code} actualizado. Campos: {changed_fields}")
+                except Exception as e:
+                    logger.error(f"Error actualizando código {code}: {str(e)}")
+        offset += limit
+    logger.info(f"Actualización completa. Total modificados: {total_updated}")
 
 
 def sync_subscribers(limit=100):
     """
-    Sincroniza automáticamente los suscriptores:
-    - Si la base está vacía: descarga todo.
-    - Si ya hay datos: busca nuevos y actualiza los existentes.
+    Ejecuta el proceso de sincronización de suscriptores:
+    - Si la base está vacía, descarga todos los registros.
+    - Si no, descarga solo los nuevos desde el último code.
     """
-    logger.info("Sincronización automática de suscriptores iniciada")
-
+    logger.info("Sincronización iniciada en modo automático")
     try:
         client = CVClient()
         client.login()
         session_id = client.session_id
-
         if DataBaseEmpty():
-            logger.info("Base de datos vacía: descarga total de suscriptores")
             return fetch_all_subscribers(session_id, limit)
         else:
-            last = LastSubscriber()
-            highest_code = last.code if last else None
-            logger.info("Base con datos: buscando nuevos y actualizando existentes")
-            new_result = fetch_new_subscribers(session_id, highest_code, limit)
-            all_data = fetch_all_subscribers(session_id, limit)  # forzar verificación de cambios
-            return new_result, all_data
-
+            download_subscribers_since_last(session_id, limit)
     except ConnectionError as ce:
         logger.error(f"Error de conexión: {str(ce)}")
     except ValueError as ve:
