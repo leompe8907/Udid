@@ -59,11 +59,12 @@ class ListOfSmartcards(models.Model):
         return self.data
 
 class SubscriberLoginInfo(models.Model):
-    subscriber = models.ForeignKey(ListOfSubscriber, on_delete=models.CASCADE,to_field ="code",null=True, blank=True, related_name='login_info')
+    subscriberCode = models.CharField(max_length=100, null=True, blank=True)
     login1 = models.IntegerField(null=True, blank=True)
     login2 = models.CharField(max_length=100, null=True, blank=True)
     additionalLogins = models.JSONField(null=True, blank=True)
     password = models.CharField(max_length=100, null=True, blank=True)
+    licenses = models.JSONField(null=True, blank=True)
 
     def __str__(self):
         return self.data

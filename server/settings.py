@@ -221,8 +221,9 @@ import logging.config
 logging.config.dictConfig(LOGGING)
 
 CRON_CLASSES = [
-    "udid.cron.SmartcardSyncCronJob",
-    'udid.cron.UpdateSmartcardsFromPanaccessCronJob',
-    "udid.cron.SubscriberSyncCronJob",
-    "udid.cron.UpdateSubscribersFromPanaccessCronJob",
+    # "udid.cron.SmartcardSyncCronJob",
+    # 'udid.cron.UpdateSmartcardsFromPanaccessCronJob',
+    # "udid.cron.SubscriberSyncCronJob",
+    # "udid.cron.UpdateSubscribersFromPanaccessCronJob",
+    "udid.cron.syncSubscriberLogin"
 ]

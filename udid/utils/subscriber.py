@@ -235,6 +235,8 @@ def sync_subscribers(limit=100):
             return fetch_all_subscribers(session_id, limit)
         else:
             download_subscribers_since_last(session_id, limit)
+    except Exception as e:
+        logger.error(f"Error durante la sincronización: {str(e)}")
     except ConnectionError as ce:
         logger.error(f"Error de conexión: {str(ce)}")
     except ValueError as ve:
