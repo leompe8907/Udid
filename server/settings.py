@@ -225,5 +225,6 @@ CRON_CLASSES = [
     # 'udid.cron.UpdateSmartcardsFromPanaccessCronJob',
     # "udid.cron.SubscriberSyncCronJob",
     # "udid.cron.UpdateSubscribersFromPanaccessCronJob",
-    "udid.cron.syncSubscriberLogin"
+    # "udid.cron.syncSubscriberLogin",
+    "udid.cron.syncMergeAllSubscriber"
 ]

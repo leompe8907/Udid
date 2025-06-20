@@ -73,18 +73,22 @@ class SubscriberLoginInfo(models.Model):
 class SubscriberInfo(models.Model):
     # Subscriber fields
     subscriber_code = models.CharField(max_length=100)
-    first_name = models.CharField(max_length=100, null=True, blank=True)
-    last_name = models.CharField(max_length=100, null=True, blank=True)
+
 
     # Smartcard fields
     sn = models.CharField(max_length=100, null=True, blank=True)
     pin = models.CharField(max_length=100, null=True, blank=True)
-    last_activation = models.DateTimeField(null=True, blank=True)
-    last_contact = models.DateTimeField(null=True, blank=True)
-    last_service_list_download = models.DateTimeField(null=True, blank=True)
+    first_name = models.CharField(max_length=100, null=True, blank=True)
+    last_name = models.CharField(max_length=100, null=True, blank=True)
+    lastActivation = models.DateTimeField(null=True, blank=True)
+    lastContact = models.DateTimeField(null=True, blank=True)
+    lastServiceListDownload = models.DateTimeField(null=True, blank=True)
+    lastActivationIP = models.CharField(max_length=100, null=True, blank=True)
+    lastApiKeyId = models.CharField(max_length=100, null=True, blank=True)
     products = models.JSONField(null=True, blank=True)
     packages = models.JSONField(null=True, blank=True)
     packageNames = models.JSONField(null=True, blank=True)
+    model = models.CharField(max_length=100, null=True, blank=True)
 
     # Login fields
     login1 = models.IntegerField(null=True, blank=True)
