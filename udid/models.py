@@ -1,8 +1,12 @@
 from django.db import models
+from django.contrib.auth.hashers import make_password, check_password
+from django.utils import timezone
+from datetime import timedelta
+import secrets
 
 class ListOfSubscriber(models.Model):
-    id = models.name = models.CharField(primary_key=True, unique=True)
-    code = models.CharField( max_length=100, blank=True, null=True, unique=True)
+    id = models.CharField(primary_key=True, unique=True, max_length=100)
+    code = models.CharField(max_length=100, blank=True, null=True, unique=True)
     lastName = models.CharField(max_length=100, null=True, blank=True)
     firstName = models.CharField(max_length=100, null=True, blank=True)
     smartcards = models.JSONField(null=True, blank=True)
@@ -19,7 +23,7 @@ class ListOfSubscriber(models.Model):
         return self.data
 
 class ListOfSmartcards(models.Model):
-    sn = models.CharField(max_length=100,unique=True, null=True, blank=True)
+    sn = models.CharField(max_length=100, unique=True, null=True, blank=True)
     subscriberCode = models.CharField(max_length=100, null=True, blank=True)
     lastName = models.CharField(max_length=100, blank=True, null=True)
     firstName = models.CharField(max_length=100, blank=True, null=True)
@@ -69,15 +73,76 @@ class SubscriberLoginInfo(models.Model):
     def __str__(self):
         return self.data
 
+class UDIDAuthRequest(models.Model):
+    STATUSES = [
+        ('pending', 'Pending'),
+        ('validated', 'Validated'),
+        ('expired', 'Expired'),
+        ('revoked', 'Revoked'),
+        ('used', 'Used'),
+    ]
+    
+    udid = models.CharField(max_length=100, unique=True, db_index=True)
+    subscriber_code = models.CharField(max_length=100, db_index=True)
+    temp_token = models.CharField(max_length=255, null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUSES, default='pending')
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    validated_at = models.DateTimeField(null=True, blank=True)
+    used_at = models.DateTimeField(null=True, blank=True)
+    
+    # Security fields
+    validated_by_operator = models.CharField(max_length=100, null=True, blank=True)
+    client_ip = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(null=True, blank=True)
+    attempts_count = models.IntegerField(default=0)
+    
+    # Device fingerprinting (opcional)
+    device_fingerprint = models.CharField(max_length=255, null=True, blank=True)
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['udid', 'status']),
+            models.Index(fields=['expires_at']),
+            models.Index(fields=['subscriber_code']),
+        ]
+    
+    def save(self, *args, **kwargs):
+        if not self.expires_at:
+            self.expires_at = timezone.now() + timedelta(minutes=15)
+        if not self.udid:
+            self.udid = str(uuid.uuid4())
+        if not self.temp_token:
+            self.temp_token = secrets.token_urlsafe(32)
+        super().save(*args, **kwargs)
+    
+    def is_expired(self):
+        return timezone.now() > self.expires_at
+    
+    def is_valid(self):
+        return (
+            self.status == 'pending' and 
+            not self.is_expired() and 
+            self.attempts_count < 5
+        )
+    
+    def mark_as_used(self):
+        self.status = 'used'
+        self.used_at = timezone.now()
+        self.save()
+    
+    def __str__(self):
+        return f"UDID Auth: {self.udid} - {self.status}"
 
 class SubscriberInfo(models.Model):
     # Subscriber fields
     subscriber_code = models.CharField(max_length=100)
 
-
     # Smartcard fields
     sn = models.CharField(max_length=100, null=True, blank=True)
-    pin = models.CharField(max_length=100, null=True, blank=True)
+    pin_hash = models.CharField(max_length=255, null=True, blank=True)  # PIN hasheado
     first_name = models.CharField(max_length=100, null=True, blank=True)
     last_name = models.CharField(max_length=100, null=True, blank=True)
     lastActivation = models.DateTimeField(null=True, blank=True)
@@ -90,16 +155,104 @@ class SubscriberInfo(models.Model):
     packageNames = models.JSONField(null=True, blank=True)
     model = models.CharField(max_length=100, null=True, blank=True)
 
-    # Login fields
+    # Login fields - passwords hasheadas
     login1 = models.IntegerField(null=True, blank=True)
     login2 = models.CharField(max_length=100, null=True, blank=True)
-    password = models.CharField(max_length=100, null=True, blank=True)
+    password_hash = models.CharField(max_length=255, null=True, blank=True)
 
-    # Udid
-    udid = models.CharField(max_length=100, null=True, blank=True, unique=True)
+    # Control de activación
+    activated = models.BooleanField(default=False)
+    activation_date = models.DateTimeField(null=True, blank=True)
+    
+    # Security fields
+    failed_login_attempts = models.IntegerField(default=0)
+    locked_until = models.DateTimeField(null=True, blank=True)
+    last_login = models.DateTimeField(null=True, blank=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
-    # Activate
-    activated = models.BooleanField(default=False, null=True, blank=True)
+    class Meta:
+        indexes = [
+            models.Index(fields=['subscriber_code']),
+            models.Index(fields=['sn']),
+            models.Index(fields=['activated']),
+        ]
+
+    def set_password(self, raw_password):
+        """Hashear y guardar contraseña"""
+        self.password_hash = make_password(raw_password)
+    
+    def check_password(self, raw_password):
+        """Verificar contraseña"""
+        if not self.password_hash:
+            return False
+        return check_password(raw_password, self.password_hash)
+    
+    def set_pin(self, raw_pin):
+        """Hashear y guardar PIN"""
+        self.pin_hash = make_password(raw_pin)
+    
+    def check_pin(self, raw_pin):
+        """Verificar PIN"""
+        if not self.pin_hash:
+            return False
+        return check_password(raw_pin, self.pin_hash)
+    
+    def is_locked(self):
+        """Verificar si la cuenta está bloqueada"""
+        if not self.locked_until:
+            return False
+        return timezone.now() < self.locked_until
+    
+    def lock_account(self, minutes=30):
+        """Bloquear cuenta por X minutos"""
+        self.locked_until = timezone.now() + timedelta(minutes=minutes)
+        self.save()
+    
+    def unlock_account(self):
+        """Desbloquear cuenta"""
+        self.locked_until = None
+        self.failed_login_attempts = 0
+        self.save()
+    
+    def activate(self):
+        """Activar subscriber"""
+        self.activated = True
+        self.activation_date = timezone.now()
+        self.save()
 
     def __str__(self):
         return self.data
+
+class AuthAuditLog(models.Model):
+    ACTION_TYPES = [
+        ('udid_generated', 'UDID Generated'),
+        ('udid_validated', 'UDID Validated'),
+        ('udid_used', 'UDID Used'),
+        ('login_attempt', 'Login Attempt'),
+        ('login_success', 'Login Success'),
+        ('login_failed', 'Login Failed'),
+        ('account_locked', 'Account Locked'),
+        ('account_unlocked', 'Account Unlocked'),
+    ]
+    
+    action_type = models.CharField(max_length=20, choices=ACTION_TYPES)
+    subscriber_code = models.CharField(max_length=100, null=True, blank=True)
+    udid = models.CharField(max_length=100, null=True, blank=True)
+    operator_id = models.CharField(max_length=100, null=True, blank=True)
+    client_ip = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(null=True, blank=True)
+    details = models.JSONField(null=True, blank=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['timestamp']),
+            models.Index(fields=['subscriber_code']),
+            models.Index(fields=['action_type']),
+        ]
+    
+    def __str__(self):
+        return f"{self.action_type} - {self.subscriber_code} - {self.timestamp}"

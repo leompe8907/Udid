@@ -96,10 +96,6 @@ def last_subscriber_info():
         logger.warning("[last_subscriber_info] No hay registros en SubscriberInfo.")
         return None
 
-import json
-from ..models import SubscriberInfo
-from django.db import transaction
-
 def merge_subscriber_data(subscriber_code):
     """
     Fusiona datos de smartcard y login en la tabla SubscriberInfo.
@@ -108,10 +104,10 @@ def merge_subscriber_data(subscriber_code):
     logger.info(f"[merge_subscriber_data] Iniciando consolidación para {subscriber_code}")
 
     try:
-        smartcard_data = get_smartcard_data(subscriber_code)
+        smartcard_data_list = get_smartcard_data(subscriber_code)
         login_data = get_login_data(subscriber_code)
 
-        if not smartcard_data:
+        if not smartcard_data_list:
             logger.warning(f"[merge_subscriber_data] No hay datos de smartcard para {subscriber_code}")
             return
 
@@ -120,35 +116,46 @@ def merge_subscriber_data(subscriber_code):
             return
 
         # Crear un registro por cada SN
-        for sc in smartcard_data:
-            sn = sc.get('sn')
-            # if not sn:
-            #     continue  # Salta si no tiene SN
+        for smartcard_data in smartcard_data_list:
+            sn = smartcard_data.get('sn')
+            if not sn:
+                continue
 
-            SubscriberInfo.objects.create(
+            obj, created = SubscriberInfo.objects.get_or_create(
                 subscriber_code=subscriber_code,
                 sn=sn,
-                pin=sc.get('pin'),
-                first_name=sc.get('firstName'),
-                last_name=sc.get('lastName'),
-                lastActivation=sc.get('lastActivation'),
-                lastContact=sc.get('lastContact'),
-                lastServiceListDownload=sc.get('lastServiceListDownload'),
-                lastActivationIP=sc.get('lastActivationIP'),
-                lastApiKeyId=sc.get('lastApiKeyId'),
-                products=sc.get('products'),
-                packages=sc.get('packages'),
-                packageNames=sc.get('packageNames'),
-                model=sc.get('model'),
-                login1=login_data.get('login1'),
-                login2=login_data.get('login2'),
-                password=login_data.get('password'),
             )
-            logger.info(f"[merge_subscriber_data] Registro creado para SN={sn}")
+
+            # Datos de Smartcard
+            obj.first_name = smartcard_data.get('firstName')
+            obj.last_name = smartcard_data.get('lastName')
+            obj.lastActivation = smartcard_data.get('lastActivation')
+            obj.lastContact = smartcard_data.get('lastContact')
+            obj.lastServiceListDownload = smartcard_data.get('lastServiceListDownload')
+            obj.lastActivationIP = smartcard_data.get('lastActivationIP')
+            obj.lastApiKeyId = smartcard_data.get('lastApiKeyId')
+            obj.products = smartcard_data.get('products')
+            obj.packages = smartcard_data.get('packages')
+            obj.packageNames = smartcard_data.get('packageNames')
+            obj.model = smartcard_data.get('model')
+
+            pin_raw = smartcard_data.get('pin')
+            if pin_raw:
+                obj.set_pin(pin_raw)
+
+            # Datos de login
+            obj.login1 = login_data.get('login1')
+            obj.login2 = login_data.get('login2')
+            password_raw = login_data.get('password')
+            if password_raw:
+                obj.set_password(password_raw)
+
+            obj.save()
+
+            logger.info(f"[merge_subscriber_data] Registro {'creado' if created else 'actualizado'} para SN={sn}")
 
     except Exception as e:
         logger.error(f"[merge_subscriber_data] Error inesperado en {subscriber_code}: {str(e)}")
-
 
 def sync_merge_all_subscribers():
     """
