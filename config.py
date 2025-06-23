@@ -1,6 +1,8 @@
 import os
 from dotenv import load_dotenv
 
+load_dotenv(override=True)
+
 # Cargar variables desde el archivo .env
 load_dotenv()
 
