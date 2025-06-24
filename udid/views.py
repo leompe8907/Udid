@@ -8,7 +8,7 @@ from django.utils import timezone
 import uuid
 import secrets
 
-from udid.models import UDIDAuthRequest, ListOfSubscriber, AuthAuditLog
+from udid.models import UDIDAuthRequest, ListOfSubscriber, AuthAuditLog, SubscriberInfo
 
 class RequestUDIDView(APIView):
     permission_classes = [AllowAny]

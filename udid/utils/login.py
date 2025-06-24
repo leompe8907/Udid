@@ -15,11 +15,12 @@ def DataBaseEmpty():
 
 def LastSubscriberLoginInfo():
     """
-    Retorna el último registro de login de suscriptor registrado en la base de datos según el campo 'subscriber_code'.
+    Retorna el último registro de login de suscriptor registrado en la base de datos según el campo 'subscriberCode'.
     """
     logger.info("Buscando el último login de suscriptor registrado en la base de datos...")
     try:
-        return SubscriberLoginInfo.objects.latest('subscriber_code')
+        # CORRECCIÓN: Usar 'subscriberCode' en lugar de 'subscriber_code'
+        return SubscriberLoginInfo.objects.latest('subscriberCode')
     except SubscriberLoginInfo.DoesNotExist:
         logger.warning("No se encontró ningún login de suscriptor en la base de datos.")
         return None
@@ -76,11 +77,16 @@ def store_logins_to_db(login_data_list):
                 continue
 
             try:
-                SubscriberLoginInfo.objects.create(
+                # CORRECCIÓN: Usar get_or_create para evitar duplicados
+                obj, created = SubscriberLoginInfo.objects.get_or_create(
                     subscriberCode=subscriber_code,
-                    **{k: v for k, v in login_data.items() if k != 'subscriberCode'}
+                    defaults={k: v for k, v in login_data.items() if k != 'subscriberCode'}
                 )
-                saved_count += 1
+                if created:
+                    saved_count += 1
+                    logger.debug(f"Nuevo registro creado para {subscriber_code}")
+                else:
+                    logger.debug(f"Registro ya existe para {subscriber_code}")
             except Exception as e:
                 logger.error(f"Error al guardar login de {subscriber_code}: {str(e)}")
 
@@ -95,13 +101,13 @@ def fetch_new_logins_from_panaccess(session_id):
         session_id (str): ID de sesión activa de Panaccess.
 
     Returns:
-        list: Lista de diccionarios con información de login para los nuevos suscriptores.
+        int: Número de registros guardados correctamente.
     """
     logger.info("Obteniendo logins de nuevos suscriptores desde Panaccess...")
 
     # Último registro guardado
     last_record = LastSubscriberLoginInfo()
-    last_code = last_record.subscriber_code if last_record else None
+    last_code = last_record.subscriberCode if last_record else None
 
     # Todos los códigos disponibles
     all_codes = sorted(get_all_subscriber_codes())
@@ -114,50 +120,149 @@ def fetch_new_logins_from_panaccess(session_id):
 
     logger.info(f"Nuevos códigos de suscriptores detectados: {len(new_codes)}")
 
+    # CORRECCIÓN: Filtrar códigos que ya existen en la BD
+    existing_codes = set(
+        SubscriberLoginInfo.objects.values_list('subscriberCode', flat=True)
+    )
+    new_codes = [code for code in new_codes if code not in existing_codes]
+    logger.info(f"Códigos nuevos después de filtrar existentes: {len(new_codes)}")
+
     results = []
     for code in new_codes:
         login_info = CallSubscriberLoginInfo(session_id, code)
         if login_info:
             # Agregar el código manualmente si no viene en la respuesta
-            login_info['subscriber_code'] = code
+            login_info['subscriberCode'] = code
             results.append(login_info)
 
     logger.info(f"Total de nuevos logins obtenidos correctamente: {len(results)}")
     return store_logins_to_db(results)
 
-def sync_subscriber_logins():
+def compare_and_update_all_existing(session_id):
+    """
+    Compara todos los registros de login de Panaccess con la BD y actualiza solo los campos
+    que hayan cambiado. No crea nuevos registros.
+
+    Args:
+        session_id (str): ID de sesión activo de Panaccess.
+    """
+    logger.info("Comparando logins de suscriptores de Panaccess con la base de datos...")
+
+    # Obtener todos los registros existentes de la BD en memoria
+    # Usar el campo correcto según tu modelo (subscriberCode)
+    local_data = {
+        obj.subscriberCode: obj for obj in SubscriberLoginInfo.objects.all()
+        if obj.subscriberCode  # Solo los que tienen código válido
+    }
+    
+    logger.info(f"Registros locales encontrados: {len(local_data)}")
+
+    # Obtener todos los códigos de suscriptores válidos
+    subscriber_codes = get_all_subscriber_codes()
+    total_updated = 0
+    total_processed = 0
+
+    for subscriber_code in subscriber_codes:
+        # Solo procesar si el código ya existe en la BD
+        if subscriber_code not in local_data:
+            continue
+            
+        try:
+            # Obtener datos remotos de Panaccess
+            remote_login = CallSubscriberLoginInfo(session_id, subscriber_code)
+            if not remote_login:
+                logger.warning(f"No se pudo obtener datos remotos para {subscriber_code}")
+                continue
+
+            total_processed += 1
+            local_obj = local_data[subscriber_code]
+            changed_fields = []
+
+            # Comparar campo por campo
+            for key, remote_value in remote_login.items():
+                # Mapear el campo si es necesario (API usa subscriberCode, modelo usa subscriberCode)
+                model_field = key
+                
+                if hasattr(local_obj, model_field):
+                    local_value = getattr(local_obj, model_field)
+                    
+                    # Comparar valores (convertir a string para evitar problemas de tipo)
+                    if str(local_value) != str(remote_value):
+                        setattr(local_obj, model_field, remote_value)
+                        changed_fields.append(model_field)
+
+            # Guardar solo si hay cambios
+            if changed_fields:
+                try:
+                    local_obj.save(update_fields=changed_fields)
+                    total_updated += 1
+                    logger.debug(f"Subscriber {subscriber_code} actualizado. Campos: {changed_fields}")
+                except Exception as e:
+                    logger.error(f"Error actualizando subscriber {subscriber_code}: {str(e)}")
+            else:
+                logger.debug(f"Sin cambios para subscriber {subscriber_code}")
+
+        except Exception as e:
+            logger.error(f"Error procesando subscriber {subscriber_code}: {str(e)}")
+
+    logger.info(f"Actualización completa. Total procesados: {total_processed}, Total actualizados: {total_updated}")
+    return total_updated
+
+def sync_subscriber_logins(session_id):
     """
     Sincroniza los logins de suscriptores desde Panaccess hacia la base de datos.
 
     - Si no hay registros en la base ⇒ trae todos.
-    - Si ya hay registros           ⇒ trae solo los nuevos.
+    - Si ya hay registros           ⇒ trae solo los nuevos y actualiza existentes.
     """
     logger.info("Iniciando sincronización de logins de suscriptores...")
 
-    client = CVClient()
-    client.login()
-    session_id = client.session_id
+    try:
+        if DataBaseEmpty():
+            logger.info("La base de datos está vacía. Obteniendo todos los logins...")
+            return fetch_all_logins_from_panaccess(session_id)
+        else:
+            last = LastSubscriberLoginInfo()
+            last_code = last.subscriberCode if last else None
+            logger.info(f"Último código de suscriptor en la base de datos: {last_code}")
 
-    if DataBaseEmpty():
-        logger.info("La base de datos está vacía. Obteniendo todos los logins...")
-        fetch_all_logins_from_panaccess(session_id)
-    else:
-        logger.info("La base de datos ya contiene registros. Obteniendo solo los nuevos...")
-        fetch_new_logins_from_panaccess(session_id)
+            # 1. Buscar nuevos logins desde Panaccess
+            logger.info("Inicio de descarga de nuevos registros...")
+            new_result = fetch_new_logins_from_panaccess(session_id)
+            logger.info("Descarga de nuevos registros finalizada.")
 
-    logger.info("Sincronización finalizada.")
+            # 2. Comparar y actualizar los existentes
+            logger.info("Comparando y actualizando registros existentes...")
+            compare_and_update_all_existing(session_id)
+            logger.info("Comparación y actualización de registros existentes finalizada.")
+            
+            return new_result
+
+        logger.info("Sincronización finalizada.")
+
+    except ConnectionError as ce:
+        logger.error(f"Error de conexión: {str(ce)}")
+        raise
+    except ValueError as ve:
+        logger.error(f"Error de valor: {str(ve)}")
+        raise
+    except Exception as e:
+        logger.error(f"Error inesperado durante la sincronización: {str(e)}")
+        raise
 
 def CallSubscriberLoginInfo(session_id, subscriber_code):
     """
-    Llama a la API de Panaccess para obtener las credenciales de los subcriptores.
-        Args:
+    Llama a la API de Panaccess para obtener las credenciales de los suscriptores.
+    
+    Args:
         session_id (str): The session ID.
         subscriber_code (str): The subscriber code.
-        Returns:
+        
+    Returns:
         dict: The response.
     """
     
-    logger.info(f"Lamando API Panaccess para obtener credenciales de {subscriber_code}")
+    logger.info(f"Llamando API Panaccess para obtener credenciales de {subscriber_code}")
     client = CVClient()
     client.session_id = session_id
 
@@ -171,6 +276,9 @@ def CallSubscriberLoginInfo(session_id, subscriber_code):
             result['subscriberCode'] = subscriber_code
             return result
         else:
-            raise Exception(response.get('errorMessage', 'Error desconocido al obtener suscriptores'))
+            error_msg = response.get('errorMessage', 'Error desconocido al obtener suscriptores')
+            logger.error(f"Error en API para {subscriber_code}: {error_msg}")
+            return None
     except Exception as e:
         logger.error(f"Error al obtener credenciales de {subscriber_code}: {str(e)}")
+        return None

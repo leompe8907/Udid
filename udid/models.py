@@ -2,7 +2,11 @@ from django.db import models
 from django.contrib.auth.hashers import make_password, check_password
 from django.utils import timezone
 from datetime import timedelta
+
 import secrets
+import uuid
+
+from .utils.encryption import encrypt_value, decrypt_value
 
 class ListOfSubscriber(models.Model):
     id = models.CharField(primary_key=True, unique=True, max_length=100)
@@ -181,24 +185,23 @@ class SubscriberInfo(models.Model):
         ]
 
     def set_password(self, raw_password):
-        """Hashear y guardar contraseña"""
-        self.password_hash = make_password(raw_password)
+        self.password_hash = encrypt_value(raw_password)
+    
+    def get_password(self):
+        return decrypt_value(self.password_hash) if self.password_hash else None
     
     def check_password(self, raw_password):
-        """Verificar contraseña"""
-        if not self.password_hash:
-            return False
-        return check_password(raw_password, self.password_hash)
+        return self.get_password() == raw_password
     
     def set_pin(self, raw_pin):
-        """Hashear y guardar PIN"""
-        self.pin_hash = make_password(raw_pin)
+        self.pin_hash = encrypt_value(raw_pin)
+    
+    def get_pin(self):
+        return decrypt_value(self.pin_hash) if self.pin_hash else None
     
     def check_pin(self, raw_pin):
-        """Verificar PIN"""
-        if not self.pin_hash:
-            return False
-        return check_password(raw_pin, self.pin_hash)
+        return self.get_pin() == raw_pin
+
     
     def is_locked(self):
         """Verificar si la cuenta está bloqueada"""

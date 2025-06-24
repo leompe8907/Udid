@@ -2,7 +2,7 @@ import logging
 from django.db import transaction
 from .auth import CVClient
 from ..models import ListOfSubscriber
-from ..serializers import SubscriberSerializer
+from ..serializers import ListOfSubscriberSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ def store_or_update_subscribers(data_batch):
         with transaction.atomic():
             new_objects = []
             for item in chunk:
-                serializer = SubscriberSerializer(data=item)
+                serializer = ListOfSubscriberSerializer(data=item)
                 if not serializer.is_valid():
                     logger.warning(f"Datos inválidos: {serializer.errors}")
                     total_invalid += 1
@@ -220,29 +220,42 @@ def compare_and_update_all_subscribers(session_id, limit=100):
     logger.info(f"Actualización completa. Total modificados: {total_updated}")
 
 
-def sync_subscribers(limit=100):
+def sync_subscribers(session_id, limit=100):
     """
     Ejecuta el proceso de sincronización de suscriptores:
     - Si la base está vacía, descarga todos los registros.
     - Si no, descarga solo los nuevos desde el último code.
     """
-    logger.info("Sincronización iniciada en modo automático")
+    logger.info("Iniciando sincronización de suscriptores")
+
     try:
-        client = CVClient()
-        client.login()
-        session_id = client.session_id
         if DataBaseEmpty():
+            logger.info("Base vacía: descarga completa")
             return fetch_all_subscribers(session_id, limit)
         else:
-            download_subscribers_since_last(session_id, limit)
+            last = LastSubscriber()
+            highest_code = last.code if last else None
+            logger.info(f"Último código: {highest_code}")
+            
+            logger.info("Base existente: descarga incremental + actualización")
+            # 1. Nuevos registros
+            logger.info("Inicio de Descarga de suscriptores nuevos desde el último registrado")
+            new_result = download_subscribers_since_last(session_id, limit)
+            logger.info(f"Fin de Descarga de suscriptores nuevos completada.")
+            
+            # 2. Actualizar existentes
+            logger.info("Inicio de Actualización de suscriptores existentes")
+            compare_and_update_all_subscribers(session_id, limit)
+            logger.info("Fin de Actualización de suscriptores existentes completada.")
+
+            return new_result
+
+    except (ConnectionError, ValueError) as e:
+        logger.error(f"Error específico durante sincronización: {str(e)}")
+        raise
     except Exception as e:
-        logger.error(f"Error durante la sincronización: {str(e)}")
-    except ConnectionError as ce:
-        logger.error(f"Error de conexión: {str(ce)}")
-    except ValueError as ve:
-        logger.error(f"Error de valor: {str(ve)}")
-    except Exception as e:
-        logger.error(f"Error inesperado durante la sincronización: {str(e)}")
+        logger.error(f"Error inesperado: {str(e)}")
+        raise
 
 
 def CallListSubscribers(session_id, offset=0, limit=100):

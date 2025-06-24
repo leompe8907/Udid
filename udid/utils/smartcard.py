@@ -161,7 +161,7 @@ def compare_and_update_all_existing(session_id, limit=100):
 
     logger.info(f"Actualización completa. Total de smartcards modificadas: {total_updated}")
 
-def sync_smartcards(limit=100):
+def sync_smartcards(session_id, limit=100):
     """
     Sincroniza automáticamente las smartcards:
     - Si la base está vacía: descarga todos los registros.
@@ -170,9 +170,6 @@ def sync_smartcards(limit=100):
     logger.info("Sincronización iniciada en modo automático")
 
     try:
-        client = CVClient()
-        client.login()
-        session_id = client.session_id
 
         if DataBaseEmpty():
             logger.info("Base de datos vacía: descargando todo")
@@ -182,9 +179,15 @@ def sync_smartcards(limit=100):
             highest_sn = last.sn if last else None
             logger.info(f"Base existente: buscando nuevos desde SN {highest_sn} y actualizando cambios")
             
-            # Buscar nuevos registros
+            #*1. Buscar nuevos registros
+            logger.info("Inicio de Descargando smartcards nuevas desde Panaccess...")
             new_result = download_smartcards_since_last(session_id, limit)
+            logger.info(f"Fin descarga de smartcards nuevas completada.")
             
+            #*2. Actualizar registros existentes
+            logger.info("Inicio de Actualizan de smartcards existentes...")
+            compare_and_update_all_existing(session_id, limit)
+            logger.info("Fin de actualización de smartcards existentes.")
             
             return new_result
 
