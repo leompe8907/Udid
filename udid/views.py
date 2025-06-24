@@ -40,10 +40,11 @@ class RequestUDIDView(APIView):
 class ValidateUDIDView(APIView):
     permission_classes = [AllowAny]
     def post(self, request):
-        udid = request.data.get('udid')
-        temp_token = request.data.get('temp_token')
-        subscriber_code = request.data.get('subscriber_code')
-        operator_id = request.data.get('operator_id')  # opcional
+        # Intentar obtener parámetros del body primero, luego de query params
+        udid = request.data.get('udid') or request.query_params.get('udid')
+        temp_token = request.data.get('temp_token') or request.query_params.get('temp_token')
+        subscriber_code = request.data.get('subscriber_code') or request.query_params.get('subscriber_code')
+        operator_id = request.data.get('operator_id') or request.query_params.get('operator_id')  # opcional
 
         # Validaciones iniciales
         if not all([udid, temp_token, subscriber_code]):
