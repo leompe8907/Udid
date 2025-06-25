@@ -88,6 +88,7 @@ class UDIDAuthRequest(models.Model):
     
     udid = models.CharField(max_length=100, unique=True, db_index=True)
     subscriber_code = models.CharField(max_length=100, db_index=True)
+    sn = models.CharField(max_length=100, null=True, blank=True)
     temp_token = models.CharField(max_length=255, null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUSES, default='pending')
     
@@ -111,6 +112,9 @@ class UDIDAuthRequest(models.Model):
             models.Index(fields=['udid', 'status']),
             models.Index(fields=['expires_at']),
             models.Index(fields=['subscriber_code']),
+            models.Index(fields=['sn']),
+            models.Index(fields=['subscriber_code', 'sn']),
+            models.Index(fields=['status', 'expires_at']),
         ]
     
     def save(self, *args, **kwargs):
