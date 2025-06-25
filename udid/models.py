@@ -103,7 +103,7 @@ class UDIDAuthRequest(models.Model):
     user_agent = models.TextField(null=True, blank=True)
     attempts_count = models.IntegerField(default=0)
     
-    # Device fingerprinting (opcional)
+    # Device fingerprinting
     device_fingerprint = models.CharField(max_length=255, null=True, blank=True)
     
     class Meta:
@@ -127,8 +127,8 @@ class UDIDAuthRequest(models.Model):
     
     def is_valid(self):
         return (
-            self.status == 'pending' and 
-            not self.is_expired() and 
+            self.status == 'pending' and
+            not self.is_expired() and
             self.attempts_count < 5
         )
     

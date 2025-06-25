@@ -96,27 +96,42 @@ class GetSubscriberInfoView(APIView):
     def get(self, request):
         udid = request.query_params.get('udid')
 
+        # Validar que se haya pasado el UDID
         if not udid:
             return Response({"error": "Parámetro 'udid' requerido."}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Intentar obtener la solicitud de UDID
         try:
             req = UDIDAuthRequest.objects.get(udid=udid)
         except UDIDAuthRequest.DoesNotExist:
             return Response({"error": "UDID no encontrado."}, status=status.HTTP_404_NOT_FOUND)
 
+        # Validar estado de la solicitud
         if req.status != "validated":
             return Response({"error": f"UDID no está validado. Estado actual: {req.status}"}, status=status.HTTP_403_FORBIDDEN)
 
+        # Verificar si el token ha expirado
         if req.is_expired():
             req.status = "expired"
             req.save()
             return Response({"error": "El token ha expirado."}, status=status.HTTP_403_FORBIDDEN)
 
+        # Obtener información del subscriber_code
         subscriber_code = req.subscriber_code
 
-        subscriber_infos = SubscriberInfo.objects.filter(subscriber_code=subscriber_code)
+        # Verificar si existe información de smartcard para el subscriber_code
+        subscriber_infos = SubscriberInfo.objects.filter(subscriber_code=subscriber_code).exclude(products__isnull=True).exclude(products=[])
 
         if not subscriber_infos.exists():
+            AuthAuditLog.objects.create(
+            action_type='udid_used',
+            udid=udid,
+            subscriber_code=subscriber_code,
+            client_ip=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
+            details={"total_smartcards": 0}
+        )
+            req.mark_as_used()
             return Response({"error": "No hay información de smartcard para este usuario."}, status=status.HTTP_404_NOT_FOUND)
 
         # Serializar manualmente (o usar un serializer si lo preferís)
@@ -129,7 +144,8 @@ class GetSubscriberInfoView(APIView):
                 "packageNames": sub.packageNames,
                 "login1": sub.login1,
                 "login2": sub.login2,
-                "model": sub.model
+                "model": sub.model,
+                "password_hash": sub.password_hash
             })
 
         # Marcar como usado
