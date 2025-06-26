@@ -5,6 +5,8 @@ from rest_framework.permissions import AllowAny
 
 from django.utils import timezone
 
+from datetime import timedelta
+
 import uuid
 import secrets
 
@@ -93,6 +95,7 @@ class ValidateUDIDView(APIView):
 
 class GetSubscriberInfoView(APIView):
     permission_classes = [AllowAny]
+    
     def get(self, request):
         udid = request.query_params.get('udid')
 
@@ -116,10 +119,16 @@ class GetSubscriberInfoView(APIView):
             req.save()
             return Response({"error": "El token ha expirado."}, status=status.HTTP_403_FORBIDDEN)
 
-        # Obtener información del subscriber_code
+        # LIMPIAR UDIDS EXPIRADOS PRIMERO (muy importante!)
+        UDIDAuthRequest.objects.filter(
+            expires_at__lt=timezone.now(),
+            status__in=['validated', 'pending']
+        ).update(status='expired', sn=None)
+
+        # PASO 1: Buscar subscriber code
         subscriber_code = req.subscriber_code
 
-        # Verificar si existe información de smartcard para el subscriber_code
+        # PASO 2-3: Filtrar todas las SNs del subscriber con productos asociados
         subscriber_infos = SubscriberInfo.objects.filter(
             subscriber_code=subscriber_code
         ).exclude(
@@ -135,43 +144,72 @@ class GetSubscriberInfoView(APIView):
                 subscriber_code=subscriber_code,
                 client_ip=request.META.get('REMOTE_ADDR'),
                 user_agent=request.META.get('HTTP_USER_AGENT', ''),
-                details={"total_smartcards": 0}
+                details={"total_smartcards": 0, "error": "No smartcards with products"}
             )
             req.mark_as_used()
             return Response({"error": "No hay información de smartcard para este usuario."}, status=status.HTTP_404_NOT_FOUND)
 
-        # Si hay múltiples smartcards, buscar una que no esté siendo usada por otro UDID activo
-        selected_subscriber = None
+        # PASO 4: Validar qué SNs están asociados a UDIDs activos
+        used_sns_via_udid = UDIDAuthRequest.objects.filter(
+            status__in=['validated', 'used'],
+            subscriber_code=subscriber_code,
+            expires_at__gte=timezone.now(),
+            sn__isnull=False
+        ).exclude(
+            udid=udid  # Excluir el UDID actual
+        ).values_list('sn', flat=True)
         
-        if subscriber_infos.count() > 1:
-            # Obtener SNs que están siendo usados por otros UDIDs activos del mismo subscriber_code
-            used_sns = UDIDAuthRequest.objects.filter(
-                status__in=['validated', 'used'],  # Incluir tanto validated como used
-                subscriber_code=subscriber_code,
-                expires_at__gte=timezone.now(),  # Solo UDIDs no expirados
-                sn__isnull=False  # Solo los que tienen SN asignado
-            ).exclude(
-                udid=udid  # Excluir el UDID actual
-            ).values_list('sn', flat=True)
-            
-            # Buscar la primera smartcard disponible (no usada por otro UDID)
-            for sub in subscriber_infos:
-                if sub.sn not in used_sns:
-                    selected_subscriber = sub
-                    break
-            
-            # Si no hay ninguna disponible, usar la primera (fallback)
-            if not selected_subscriber:
-                selected_subscriber = subscriber_infos.first()
-        else:
-            # Si solo hay una smartcard, usarla
-            selected_subscriber = subscriber_infos.first()
+        print(f"🔍 DEBUG - Subscriber: {subscriber_code}")
+        print(f"🔍 DEBUG - SNs ocupados: {list(used_sns_via_udid)}")
+        print(f"🔍 DEBUG - Total SNs disponibles: {subscriber_infos.count()}")
 
+        # PASO 5-6: Buscar SN disponible o retornar mensaje si no hay
+        selected_subscriber = None
+        available_sns = []
+        
+        for sub in subscriber_infos:
+            if sub.sn not in used_sns_via_udid:
+                available_sns.append(sub.sn)
+                if not selected_subscriber:  # Tomar la primera disponible
+                    selected_subscriber = sub
+        
+        print(f"🔍 DEBUG - SNs disponibles: {available_sns}")
+        
+        # PASO 5: Si no hay SNs disponibles, retornar mensaje de error
+        if not selected_subscriber:
+            AuthAuditLog.objects.create(
+                action_type='udid_used',
+                udid=udid,
+                subscriber_code=subscriber_code,
+                client_ip=request.META.get('REMOTE_ADDR'),
+                user_agent=request.META.get('HTTP_USER_AGENT', ''),
+                details={
+                    "total_smartcards": subscriber_infos.count(),
+                    "all_sns_occupied": True,
+                    "used_sns": list(used_sns_via_udid),
+                    "error": "All smartcards are currently in use"
+                }
+            )
+            req.mark_as_used()
+            return Response({
+                "error": (f"❌ El usuario {subscriber_code} no puede asociar mas dispositivos porfavor comuniquese con su operador de cabe."),
+                "details": {
+                    "subscriber_code": subscriber_code,
+                    "total_smartcards": subscriber_infos.count(),
+                    "smartcards_in_use": len(used_sns_via_udid),
+                    "retry_after_minutes": 15,
+                    "occupied_sns": list(used_sns_via_udid)
+                }
+            }, status=status.HTTP_409_CONFLICT)
+
+        # PASO 6: Enviar la SN disponible
         # Asignar el SN seleccionado al UDIDAuthRequest
         req.sn = selected_subscriber.sn
         req.save()
 
-        # Preparar la respuesta con una sola smartcard
+        print(f"✅ DEBUG - SN asignado: {selected_subscriber.sn} a UDID: {udid}")
+
+        # Preparar la respuesta con la smartcard seleccionada
         result = {
             "sn": selected_subscriber.sn,
             "products": selected_subscriber.products,
@@ -186,7 +224,7 @@ class GetSubscriberInfoView(APIView):
         # Marcar como usado
         req.mark_as_used()
 
-        # Registrar en log de auditoría incluyendo el SN seleccionado
+        # Registrar en log de auditoría
         AuthAuditLog.objects.create(
             action_type='udid_used',
             udid=udid,
@@ -195,15 +233,22 @@ class GetSubscriberInfoView(APIView):
             user_agent=request.META.get('HTTP_USER_AGENT', ''),
             details={
                 "total_smartcards": subscriber_infos.count(),
+                "available_smartcards": len(available_sns),
                 "sn_used": selected_subscriber.sn,
-                "selection_reason": "multiple_cards" if subscriber_infos.count() > 1 else "single_card"
+                "selection_reason": "first_available"
             }
         )
 
         return Response({
-            "subscriber_code": subscriber_code, 
-            "data": result  # Retorna un objeto único en lugar de una lista
+            "subscriber_code": subscriber_code,
+            "data": result,
+            "metadata": {
+                "total_smartcards": subscriber_infos.count(),
+                "available_smartcards": len(available_sns),
+                "sn_assigned": selected_subscriber.sn
+            }
         }, status=status.HTTP_200_OK)
+
 
 class RevokeUDIDView(APIView):
     permission_classes = [AllowAny]
