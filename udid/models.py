@@ -91,6 +91,9 @@ class UDIDAuthRequest(models.Model):
     sn = models.CharField(max_length=100, null=True, blank=True)
     temp_token = models.CharField(max_length=255, null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUSES, default='pending')
+    lastActivation = models.DateTimeField(null=True, blank=True)
+    lastServiceListDownload = models.DateTimeField(null=True, blank=True)
+    lastActivationIP = models.CharField(max_length=100, null=True, blank=True)
     
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
