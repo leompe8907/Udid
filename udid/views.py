@@ -216,21 +216,36 @@ class GetSubscriberInfoView(APIView):
                 "error": "El usuario no tiene productos asociados a su cuenta."
             }, status=status.HTTP_404_NOT_FOUND)
 
-        #✅ PASO 3: Validar qué SNs están asociados a UDIDs activos
+        #✅ PASO 3: Validar qué SNs están asociados a UDIDs activos (CUALQUIER APP_TYPE)
         used_sns_via_udid = UDIDAuthRequest.objects.filter(
+            status__in=['validated', 'used'],
+            subscriber_code=subscriber_code,
+            expires_at__gte=timezone.now(),
+            sn__isnull=False
+            # ❌ NO filtrar por app_type - queremos ALL SNs ocupadas
+        ).exclude(
+            udid=udid  # Excluir el UDID actual
+        ).values_list('sn', flat=True)
+
+        # ✅ OBTENER DETALLES DE SNs EN USO PARA DEBUG
+        used_sns_with_app_type = UDIDAuthRequest.objects.filter(
             status__in=['validated', 'used'],
             subscriber_code=subscriber_code,
             expires_at__gte=timezone.now(),
             sn__isnull=False
         ).exclude(
             udid=udid
-        ).values_list('sn', flat=True)
-        
+        ).values('sn', 'app_type', 'udid')
+
         print(f"🔍 DEBUG - Subscriber: {subscriber_code}")
-        print(f"🔍 DEBUG - SNs ocupados: {list(used_sns_via_udid)}")
+        print(f"🔍 DEBUG - App Type solicitado: {app_type}")
+        print(f"🔍 DEBUG - SNs ocupados (todos los tipos): {list(used_sns_via_udid)}")
+        print(f"🔍 DEBUG - Detalles de SNs ocupados:")
+        for usage in used_sns_with_app_type:
+            print(f"    SN {usage['sn']} → {usage['app_type']} (UDID: {usage['udid'][:8]}...)")
         print(f"🔍 DEBUG - Total SNs disponibles: {subscriber_infos.count()}")
 
-        #✅ PASO 4: Buscar SN disponible o retornar mensaje si no hay
+        #✅ PASO 4: Buscar SN disponible (que NO esté en uso por NINGÚN tipo de app)
         selected_subscriber = None
         available_sns = []
         
@@ -240,21 +255,36 @@ class GetSubscriberInfoView(APIView):
                 if not selected_subscriber:
                     selected_subscriber = sub
         
-        print(f"🔍 DEBUG - SNs disponibles: {available_sns}")
+        print(f"🔍 DEBUG - SNs completamente disponibles: {available_sns}")
         
-        #✅ PASO 5: Si no hay SNs disponibles, retornar mensaje de error
+        #✅ PASO 5: Si no hay SNs disponibles, mostrar detalles específicos
         if not selected_subscriber:
-            self._log_failed_attempt(req, "All SNs occupied", request, {
+            # Crear información detallada del uso de SNs
+            usage_details = {}
+            for usage in used_sns_with_app_type:
+                sn = usage['sn']
+                app_type_used = usage['app_type']
+                if sn not in usage_details:
+                    usage_details[sn] = []
+                usage_details[sn].append(app_type_used)
+            
+            self._log_failed_attempt(req, "All SNs occupied by different app types", request, {
                 "total_sns": subscriber_infos.count(),
-                "occupied_sns": list(used_sns_via_udid)
+                "sn_usage_details": usage_details,
+                "requested_app_type": app_type
             })
             req.mark_as_used()
+            
             return Response({
-                "error": f"❌ El usuario {subscriber_code} no puede asociar más dispositivos. Por favor comuníquese con su operador.",
+                "error": f"❌ El usuario {subscriber_code} no tiene smartcards disponibles. Todas están en uso por otros dispositivos.",
                 "details": {
                     "subscriber_code": subscriber_code,
+                    "requested_app_type": app_type,
                     "total_smartcards": subscriber_infos.count(),
                     "smartcards_in_use": len(used_sns_via_udid),
+                    "available_smartcards": 0,
+                    "usage_breakdown": usage_details,
+                    "message": "Cada smartcard solo puede estar activa en un tipo de dispositivo a la vez",
                     "retry_after_minutes": 15
                 }
             }, status=status.HTTP_409_CONFLICT)
@@ -300,12 +330,12 @@ class GetSubscriberInfoView(APIView):
 
         # ✅ PREPARAR RESPUESTA SEGURA
         response_data = {
-            "sn": selected_subscriber.sn,
+            #"sn": selected_subscriber.sn,
             "products": selected_subscriber.products,
-            "packages": selected_subscriber.packages,
-            "packageNames": selected_subscriber.packageNames,
+            #"packages": selected_subscriber.packages,
+            #"packageNames": selected_subscriber.packageNames,
             "login1": selected_subscriber.login1,
-            "login2": selected_subscriber.login2,
+            #"login2": selected_subscriber.login2,
             "model": selected_subscriber.model,
             
             # ✅ CREDENCIALES ENCRIPTADAS
@@ -489,7 +519,7 @@ class ListUDIDRequestsView(APIView):
 
         return Response(data, status=status.HTTP_200_OK)
 
-# Nueva vista para obtener estadísticas de uso de SNs
+
 class SNUsageStatsView(APIView):
     permission_classes = [AllowAny]
     def get(self, request):
@@ -513,33 +543,60 @@ class SNUsageStatsView(APIView):
             status__in=['validated', 'used'],
             expires_at__gte=timezone.now(),
             sn__isnull=False
-        ).values('udid', 'sn', 'status', 'created_at', 'validated_at', 'used_at')
+        ).values('udid', 'sn', 'status', 'app_type', 'created_at', 'validated_at', 'used_at')
         
-        # Crear mapeo de SNs en uso
-        sns_in_use = {udid['sn']: udid for udid in active_udids}
+        # Crear mapeo de SNs en uso (cada SN solo puede tener un app_type activo)
+        sns_in_use = {}
+        for udid in active_udids:
+            sn = udid['sn']
+            # Si ya existe esta SN, es un error de lógica (no debería pasar)
+            if sn in sns_in_use:
+                print(f"⚠️ WARNING: SN {sn} está siendo usado por múltiples app_types:")
+                print(f"    Existente: {sns_in_use[sn]['app_type']}")
+                print(f"    Nuevo: {udid['app_type']}")
+            sns_in_use[sn] = udid
         
-        # Preparar respuesta
+        # Preparar respuesta detallada
         smartcards_status = []
+        available_count = 0
+        
         for smartcard in all_smartcards:
             sn = smartcard['sn']
+            usage_info = sns_in_use.get(sn)
+            is_available = usage_info is None
+            
+            if is_available:
+                available_count += 1
+            
             status_info = {
                 "sn": sn,
                 "products": smartcard['products'],
                 "model": smartcard['model'],
-                "is_in_use": sn in sns_in_use,
-                "udid_info": sns_in_use.get(sn, None)
+                "is_available": is_available,
+                "current_usage": usage_info if usage_info else None,
+                "status": "available" if is_available else f"in_use_by_{usage_info['app_type']}"
             }
             smartcards_status.append(status_info)
+        
+        # Estadísticas por tipo de app
+        app_type_stats = {}
+        for udid in active_udids:
+            app_type = udid['app_type']
+            if app_type not in app_type_stats:
+                app_type_stats[app_type] = 0
+            app_type_stats[app_type] += 1
         
         return Response({
             "subscriber_code": subscriber_code,
             "total_smartcards": len(smartcards_status),
             "smartcards_in_use": len(sns_in_use),
-            "available_smartcards": len(smartcards_status) - len(sns_in_use),
-            "smartcards": smartcards_status
+            "available_smartcards": available_count,
+            "usage_by_app_type": app_type_stats,
+            "smartcards": smartcards_status,
+            "policy": "Each smartcard can only be active on one app type at a time"
         }, status=status.HTTP_200_OK)
 
-# Actualización de ValidateUDIDView para limpiar SNs de UDIDs expirados
+
 class ValidateUDIDView(APIView):
     permission_classes = [AllowAny]
     def post(self, request):
