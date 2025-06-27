@@ -101,10 +101,10 @@ def hybrid_encrypt_for_app(plaintext: str, app_type: str) -> dict:
         padding_length = 16 - (len(plaintext_bytes) % 16)
         padded_plaintext = plaintext_bytes + bytes([padding_length] * padding_length)
         
-        aes_encrypted = encryptor.update(padded_plaintext) + encryptor.finalize()
+        aes_encrypted_data = encryptor.update(padded_plaintext) + encryptor.finalize()
         
         # ✅ PASO 4: Encriptar clave AES con RSA pública
-        rsa_encrypted_key = public_key.encrypt(
+        rsa_encrypted_aes_key = public_key.encrypt(
             aes_key,
             padding.OAEP(
                 mgf=padding.MGF1(algorithm=hashes.SHA256()),
@@ -113,10 +113,10 @@ def hybrid_encrypt_for_app(plaintext: str, app_type: str) -> dict:
             )
         )
         
-        # ✅ PASO 5: Retornar estructura completa
+        # ✅ PASO 5: Retornar estructura CORRECTA
         return {
-            "encrypted_data": base64.b64encode(aes_encrypted).decode('utf-8'),
-            "encrypted_key": base64.b64encode(rsa_encrypted_key).decode('utf-8'),
+            "encrypted_data": base64.b64encode(aes_encrypted_data).decode('utf-8'),  # ✅ Datos AES encriptados
+            "encrypted_key": base64.b64encode(rsa_encrypted_aes_key).decode('utf-8'),  # ✅ Clave AES encriptada con RSA 
             "iv": base64.b64encode(iv).decode('utf-8'),
             "algorithm": "AES-256-CBC + RSA-OAEP",
             "app_type": app_type

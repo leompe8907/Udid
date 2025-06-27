@@ -1,10 +1,10 @@
-from django.views.decorators.csrf import csrf_exempt
-from rest_framework.response import Response
-from rest_framework import status
-from django.http import JsonResponse
+# from django.views.decorators.csrf import csrf_exempt
+# from rest_framework.response import Response
+# from rest_framework import status
+# from django.http import JsonResponse
 
-from .utils.auth import login
-from .utils.smartcard import sync_smartcards
+# from .utils.auth import login
+# from .utils.smartcard import sync_smartcards
 
 # version 1
 # @csrf_exempt
@@ -580,3 +580,24 @@ from .utils.smartcard import sync_smartcards
 #             "total": len(result),
 #             "results": result
 #         }, status=status.HTTP_200_OK)
+
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.backends import default_backend
+import hashlib
+
+# Cargar clave privada y extraer la clave pública
+with open("../../front/private_key.pem", "rb") as key_file:
+    private_key = serialization.load_pem_private_key(
+        key_file.read(),
+        password=None,
+        backend=default_backend()
+    )
+    public_key = private_key.public_key()
+    public_bytes = public_key.public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+
+# Calcular el fingerprint SHA-256 de la clave pública (como hace el backend)
+fingerprint = hashlib.sha256(public_bytes).hexdigest()[:16]  # Primeros 16 caracteres
+fingerprint
