@@ -10,7 +10,9 @@ from datetime import timedelta
 import uuid
 import secrets
 
-from udid.models import UDIDAuthRequest, ListOfSubscriber, AuthAuditLog, SubscriberInfo
+from udid.models import UDIDAuthRequest, ListOfSubscriber, AuthAuditLog, SubscriberInfo, AppCredentials
+
+from .management.commands.keyGenerator import rsa_encrypt_for_app
 
 class RequestUDIDView(APIView):
     permission_classes = [AllowAny]
@@ -98,10 +100,14 @@ class GetSubscriberInfoView(APIView):
     
     def get(self, request):
         udid = request.query_params.get('udid')
+        app_type = request.query_params.get('app_type', 'android_tv')
+        app_version = request.query_params.get('app_version', '1.0')
 
         # Validar que se haya pasado el UDID
         if not udid:
-            return Response({"error": "Parámetro 'udid' requerido."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "error": "Parámetro 'udid' requerido."
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         # Intentar obtener la solicitud de UDID
         try:
@@ -111,7 +117,39 @@ class GetSubscriberInfoView(APIView):
 
         # Validar estado de la solicitud
         if req.status != "validated":
-            return Response({"error": f"UDID no está validado. Estado actual: {req.status}"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({
+                "error": f"UDID no está validado. Estado actual: {req.status}"
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        # Validar que app_type sea válido
+        valid_app_types = ['android_tv', 'samsung_tv', 'lg_tv', 'set_top_box']
+        if app_type not in valid_app_types:
+            return Response({
+                "error": f"app_type debe ser uno de: {', '.join(valid_app_types)}"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            req = UDIDAuthRequest.objects.get(udid=udid)
+        except UDIDAuthRequest.DoesNotExist:
+            return Response({
+                "error": "UDID no encontrado."
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # VALIDAR CREDENCIALES DE APP
+        try:
+            app_credentials = AppCredentials.objects.get(
+                app_type=app_type, 
+                is_active=True
+            )
+        except AppCredentials.DoesNotExist:
+            return Response({
+                "error": f"No hay credenciales activas para app_type='{app_type}'"
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        # ACTUALIZAR UDID CON INFO DE APP
+        req.app_type = app_type
+        req.app_version = app_version
+        req.save()
 
         # Verificar si el token ha expirado
         if req.is_expired():
@@ -147,7 +185,9 @@ class GetSubscriberInfoView(APIView):
                 details={"total_smartcards": 0, "error": "No smartcards with products"}
             )
             req.mark_as_used()
-            return Response({"error": "No hay información de smartcard para este usuario."}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                "error": "el usuario no tiene productos asociados a su cuenta."
+            }, status=status.HTTP_404_NOT_FOUND)
 
         # PASO 4: Validar qué SNs están asociados a UDIDs activos
         used_sns_via_udid = UDIDAuthRequest.objects.filter(
@@ -209,6 +249,31 @@ class GetSubscriberInfoView(APIView):
 
         print(f"✅ DEBUG - SN asignado: {selected_subscriber.sn} a UDID: {udid}")
 
+        # ✅ ENCRIPTACIÓN SEGURA
+        try:
+            plain_password = selected_subscriber.get_password()
+            if not plain_password:
+                raise Exception("Password no disponible")
+            
+            rsa_encrypted_password = rsa_encrypt_for_app(plain_password, app_type)
+            
+            # ✅ MARCAR QUE SE ENVIÓ RESPUESTA ENCRIPTADA
+            req.encrypted_response_sent = True
+            req.save()
+            
+        except Exception as e:
+            AuthAuditLog.objects.create(
+                action_type='login_failed',
+                udid=udid,
+                subscriber_code=subscriber_code,
+                details={"encryption_error": str(e)},
+                client_ip=request.META.get('REMOTE_ADDR'),
+                user_agent=request.META.get('HTTP_USER_AGENT', '')
+            )
+            return Response({
+                "error": "Error en encriptación de credenciales"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
         # Preparar la respuesta con la smartcard seleccionada
         result = {
             "sn": selected_subscriber.sn,
@@ -218,7 +283,12 @@ class GetSubscriberInfoView(APIView):
             "login1": selected_subscriber.login1,
             "login2": selected_subscriber.login2,
             "model": selected_subscriber.model,
-            "password_hash": selected_subscriber.password_hash
+            "password_encrypted": rsa_encrypted_password,  # ✅ CAMBIAR NOMBRE
+            "encryption_info": {
+                "algorithm": "RSA-OAEP",
+                "app_type": app_type,
+                "app_version": app_version
+            }
         }
 
         # Marcar como usado
@@ -235,7 +305,10 @@ class GetSubscriberInfoView(APIView):
                 "total_smartcards": subscriber_infos.count(),
                 "available_smartcards": len(available_sns),
                 "sn_used": selected_subscriber.sn,
-                "selection_reason": "first_available"
+                "selection_reason": "first_available",
+                "app_type": app_type,
+                "app_version": app_version,
+                "encryption_successful": True
             }
         )
 
@@ -245,7 +318,11 @@ class GetSubscriberInfoView(APIView):
             "metadata": {
                 "total_smartcards": subscriber_infos.count(),
                 "available_smartcards": len(available_sns),
-                "sn_assigned": selected_subscriber.sn
+                "sn_assigned": selected_subscriber.sn,
+                "app_info": {
+                    "app_type": app_type,
+                    "app_version": app_version
+                }
             }
         }, status=status.HTTP_200_OK)
 

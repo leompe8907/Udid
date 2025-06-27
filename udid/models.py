@@ -1,5 +1,4 @@
 from django.db import models
-from django.contrib.auth.hashers import make_password, check_password
 from django.utils import timezone
 from datetime import timedelta
 
@@ -76,76 +75,6 @@ class SubscriberLoginInfo(models.Model):
 
     def __str__(self):
         return self.data
-
-class UDIDAuthRequest(models.Model):
-    STATUSES = [
-        ('pending', 'Pending'),
-        ('validated', 'Validated'),
-        ('expired', 'Expired'),
-        ('revoked', 'Revoked'),
-        ('used', 'Used'),
-    ]
-    
-    udid = models.CharField(max_length=100, unique=True, db_index=True)
-    subscriber_code = models.CharField(max_length=100, db_index=True)
-    sn = models.CharField(max_length=100, null=True, blank=True)
-    temp_token = models.CharField(max_length=255, null=True, blank=True)
-    status = models.CharField(max_length=20, choices=STATUSES, default='pending')
-    lastActivation = models.DateTimeField(null=True, blank=True)
-    lastServiceListDownload = models.DateTimeField(null=True, blank=True)
-    lastActivationIP = models.CharField(max_length=100, null=True, blank=True)
-    
-    # Timestamps
-    created_at = models.DateTimeField(auto_now_add=True)
-    expires_at = models.DateTimeField()
-    validated_at = models.DateTimeField(null=True, blank=True)
-    used_at = models.DateTimeField(null=True, blank=True)
-    
-    # Security fields
-    validated_by_operator = models.CharField(max_length=100, null=True, blank=True)
-    client_ip = models.GenericIPAddressField(null=True, blank=True)
-    user_agent = models.TextField(null=True, blank=True)
-    attempts_count = models.IntegerField(default=0)
-    
-    # Device fingerprinting
-    device_fingerprint = models.CharField(max_length=255, null=True, blank=True)
-    
-    class Meta:
-        indexes = [
-            models.Index(fields=['udid', 'status']),
-            models.Index(fields=['expires_at']),
-            models.Index(fields=['subscriber_code']),
-            models.Index(fields=['sn']),
-            models.Index(fields=['subscriber_code', 'sn']),
-            models.Index(fields=['status', 'expires_at']),
-        ]
-    
-    def save(self, *args, **kwargs):
-        if not self.expires_at:
-            self.expires_at = timezone.now() + timedelta(minutes=15)
-        if not self.udid:
-            self.udid = str(uuid.uuid4())
-        if not self.temp_token:
-            self.temp_token = secrets.token_urlsafe(32)
-        super().save(*args, **kwargs)
-    
-    def is_expired(self):
-        return timezone.now() > self.expires_at
-    
-    def is_valid(self):
-        return (
-            self.status == 'pending' and
-            not self.is_expired() and
-            self.attempts_count < 5
-        )
-    
-    def mark_as_used(self):
-        self.status = 'used'
-        self.used_at = timezone.now()
-        self.save()
-    
-    def __str__(self):
-        return f"UDID Auth: {self.udid} - {self.status}"
 
 class SubscriberInfo(models.Model):
     # Subscriber fields
@@ -266,3 +195,222 @@ class AuthAuditLog(models.Model):
     
     def __str__(self):
         return f"{self.action_type} - {self.subscriber_code} - {self.timestamp}"
+
+class AppCredentials(models.Model):
+    APP_TYPES = [
+        ('android_tv', 'Android TV'),
+        ('samsung_tv', 'Samsung Smart TV'),
+        ('lg_tv', 'LG Smart TV'),
+        ('set_top_box', 'Set Top Box'),
+        ('mobile_app', 'Mobile App'),
+        ('web_player', 'Web Player'),
+    ]
+
+    app_type = models.CharField(max_length=50, choices=APP_TYPES)
+    app_version = models.CharField(max_length=20, default='1.0', db_index=True)
+
+    # ✅ Claves RSA almacenadas correctamente
+    private_key_pem = models.TextField(help_text="Clave privada - NUNCA enviar al cliente")
+    public_key_pem = models.TextField(help_text="Clave pública - se embebe en aplicaciones")
+
+    # ✅ Control de seguridad mejorado
+    is_active = models.BooleanField(default=True)
+    is_compromised = models.BooleanField(default=False)  # Para marcar claves comprometidas
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(null=True, blank=True)  # Para rotación automática
+    
+    # ✅ Auditoría de uso
+    last_used = models.DateTimeField(null=True, blank=True)
+    usage_count = models.IntegerField(default=0)
+    
+    # ✅ Metadatos de seguridad
+    key_fingerprint = models.CharField(max_length=64, null=True, blank=True)  # SHA256 del public key
+    created_by = models.CharField(max_length=100, null=True, blank=True)
+    revoked_by = models.CharField(max_length=100, null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revocation_reason = models.TextField(null=True, blank=True)
+
+    class Meta:
+        unique_together = [['app_type', 'app_version']]
+        indexes = [
+            models.Index(fields=['app_type', 'app_version', 'is_active']),
+            models.Index(fields=['is_active', 'expires_at']),
+            models.Index(fields=['key_fingerprint']),
+        ]
+    
+    def save(self, *args, **kwargs):
+        # Generar fingerprint de la clave pública
+        if self.public_key_pem and not self.key_fingerprint:
+            import hashlib
+            self.key_fingerprint = hashlib.sha256(
+                self.public_key_pem.encode()
+            ).hexdigest()[:16]
+        super().save(*args, **kwargs)
+    
+    def is_expired(self):
+        if not self.expires_at:
+            return False
+        return timezone.now() > self.expires_at
+    
+    def is_usable(self):
+        return (
+            self.is_active and 
+            not self.is_compromised and 
+            not self.is_expired()
+        )
+    
+    def revoke(self, reason="Manual revocation", revoked_by=None):
+        """Revocar credenciales de forma segura"""
+        self.is_active = False
+        self.is_compromised = True
+        self.revoked_at = timezone.now()
+        self.revoked_by = revoked_by
+        self.revocation_reason = reason
+        self.save()
+    
+    def __str__(self):
+        status = "✅" if self.is_usable() else "❌"
+        return f"{status} {self.app_type} v{self.app_version}"
+
+class EncryptedCredentialsLog(models.Model):
+    """
+    ✅ Log de credenciales encriptadas enviadas
+    Permite auditoría sin exponer datos sensibles
+    """
+    udid = models.CharField(max_length=100, db_index=True)
+    subscriber_code = models.CharField(max_length=100, db_index=True)
+    sn = models.CharField(max_length=100, null=True, blank=True)
+    
+    # Información de la aplicación
+    app_type = models.CharField(max_length=50)
+    app_version = models.CharField(max_length=20)
+    app_credentials_id = models.ForeignKey(AppCredentials, on_delete=models.CASCADE)
+    
+    # Metadatos de encriptación (NO los datos encriptados)
+    encryption_algorithm = models.CharField(max_length=50, default="AES-256-CBC + RSA-OAEP")
+    encrypted_data_hash = models.CharField(max_length=64)  # SHA256 del payload encriptado
+    
+    # Auditoría
+    client_ip = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(null=True, blank=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
+    
+    # Estado de entrega
+    delivered_successfully = models.BooleanField(default=False)
+    delivery_attempts = models.IntegerField(default=0)
+    last_delivery_error = models.TextField(null=True, blank=True)
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['timestamp']),
+            models.Index(fields=['subscriber_code', 'app_type']),
+            models.Index(fields=['udid']),
+        ]
+    
+    def __str__(self):
+        return f"Encrypted delivery: {self.subscriber_code} - {self.app_type} - {self.timestamp}"
+
+class UDIDAuthRequest(models.Model):
+    STATUSES = [
+        ('pending', 'Pending'),
+        ('validated', 'Validated'),
+        ('expired', 'Expired'),
+        ('revoked', 'Revoked'),
+        ('used', 'Used'),
+    ]
+    
+    udid = models.CharField(max_length=100, unique=True, db_index=True)
+    subscriber_code = models.CharField(max_length=100, db_index=True)
+    sn = models.CharField(max_length=100, null=True, blank=True)
+    temp_token = models.CharField(max_length=255, null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUSES, default='pending')
+    lastActivation = models.DateTimeField(null=True, blank=True)
+    lastServiceListDownload = models.DateTimeField(null=True, blank=True)
+    lastActivationIP = models.CharField(max_length=100, null=True, blank=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    validated_at = models.DateTimeField(null=True, blank=True)
+    used_at = models.DateTimeField(null=True, blank=True)
+    
+    # Security fields
+    validated_by_operator = models.CharField(max_length=100, null=True, blank=True)
+    client_ip = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(null=True, blank=True)
+    attempts_count = models.IntegerField(default=0)
+    
+    # Device fingerprinting
+    device_fingerprint = models.CharField(max_length=255, null=True, blank=True)
+    
+    # Campos para trackear app y versión
+    app_type = models.CharField(max_length=50, null=True, blank=True)
+    app_version = models.CharField(max_length=20, null=True, blank=True)
+    encrypted_response_sent = models.BooleanField(default=False)
+    
+    # Nuevos campos de seguridad
+    app_credentials_used = models.ForeignKey(AppCredentials, on_delete=models.SET_NULL, null=True, blank=True)
+    encryption_successful = models.BooleanField(default=False)
+    credentials_delivered = models.BooleanField(default=False)
+    
+    # Rate limiting mejorado
+    requests_from_ip_count = models.IntegerField(default=0)
+    suspicious_activity = models.BooleanField(default=False)
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['udid', 'status']),
+            models.Index(fields=['expires_at']),
+            models.Index(fields=['subscriber_code']),
+            models.Index(fields=['sn']),
+            models.Index(fields=['subscriber_code', 'sn']),
+            models.Index(fields=['status', 'expires_at']),
+        ]
+    
+    def save(self, *args, **kwargs):
+        if not self.expires_at:
+            self.expires_at = timezone.now() + timedelta(minutes=15)
+        if not self.udid:
+            self.udid = str(uuid.uuid4())
+        if not self.temp_token:
+            self.temp_token = secrets.token_urlsafe(32)
+        super().save(*args, **kwargs)
+    
+    def is_expired(self):
+        return timezone.now() > self.expires_at
+    
+    def is_valid(self):
+        return (
+            self.status == 'pending' and
+            not self.is_expired() and
+            self.attempts_count < 5
+        )
+    
+    def mark_as_used(self):
+        self.status = 'used'
+        self.used_at = timezone.now()
+        self.save()
+
+    def validate_app_credentials(self):
+        """Validar que existan credenciales para el tipo de app"""
+        if self.app_type:
+            return AppCredentials.objects.filter(
+                app_type=self.app_type,
+                is_active=True
+            ).exists()
+        return True
+    
+    def mark_credentials_delivered(self, app_credentials):
+        """Marcar que las credenciales fueron entregadas exitosamente"""
+        self.credentials_delivered = True
+        self.encryption_successful = True
+        self.app_credentials_used = app_credentials
+        self.save()
+        
+        # Actualizar estadísticas de uso de las credenciales
+        app_credentials.last_used = timezone.now()
+        app_credentials.usage_count += 1
+        app_credentials.save()
+    
+    def __str__(self):
+        return f"UDID Auth: {self.udid} - {self.status}"
