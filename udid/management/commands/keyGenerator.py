@@ -70,3 +70,69 @@ def rsa_encrypt_for_app(plaintext: str, app_type: str) -> str:
         raise Exception(f"⚠️ No se encontraron claves activas para app_type={app_type}")
     except Exception as e:
         raise Exception(f"❌ Error de encriptación: {str(e)}")
+
+def hybrid_encrypt_for_app(plaintext: str, app_type: str) -> dict:
+    """
+    🔐 ENCRIPTACIÓN HÍBRIDA SEGURA:
+    1. Genera clave AES aleatoria
+    2. Encripta datos con AES (rápido)
+    3. Encripta clave AES con RSA pública del dispositivo (seguro)
+    4. Solo el dispositivo con clave privada puede desencriptar
+    """
+    try:
+        app_credentials = AppCredentials.objects.get(app_type=app_type, is_active=True)
+        
+        # ✅ PASO 1: Cargar clave PÚBLICA del dispositivo
+        public_key = serialization.load_pem_public_key(
+            app_credentials.public_key_pem.encode(),
+            backend=default_backend()
+        )
+        
+        # ✅ PASO 2: Generar clave AES simétrica aleatoria (32 bytes = 256 bits)
+        aes_key = os.urandom(32)
+        iv = os.urandom(16)  # Initialization Vector para AES
+        
+        # ✅ PASO 3: Encriptar datos con AES
+        cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
+        encryptor = cipher.encryptor()
+        
+        # Padding para AES (debe ser múltiplo de 16 bytes)
+        plaintext_bytes = plaintext.encode('utf-8')
+        padding_length = 16 - (len(plaintext_bytes) % 16)
+        padded_plaintext = plaintext_bytes + bytes([padding_length] * padding_length)
+        
+        aes_encrypted = encryptor.update(padded_plaintext) + encryptor.finalize()
+        
+        # ✅ PASO 4: Encriptar clave AES con RSA pública
+        rsa_encrypted_key = public_key.encrypt(
+            aes_key,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+        
+        # ✅ PASO 5: Retornar estructura completa
+        return {
+            "encrypted_data": base64.b64encode(aes_encrypted).decode('utf-8'),
+            "encrypted_key": base64.b64encode(rsa_encrypted_key).decode('utf-8'),
+            "iv": base64.b64encode(iv).decode('utf-8'),
+            "algorithm": "AES-256-CBC + RSA-OAEP",
+            "app_type": app_type
+        }
+        
+    except AppCredentials.DoesNotExist:
+        raise Exception(f"⚠️ No se encontraron claves activas para app_type={app_type}")
+    except Exception as e:
+        raise Exception(f"❌ Error de encriptación híbrida: {str(e)}")
+
+def verify_app_can_decrypt(app_type: str) -> bool:
+    """
+    Verifica que existan las claves necesarias para el tipo de app
+    """
+    try:
+        app_credentials = AppCredentials.objects.get(app_type=app_type, is_active=True)
+        return True
+    except AppCredentials.DoesNotExist:
+        return False

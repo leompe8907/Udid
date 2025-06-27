@@ -9,7 +9,7 @@ class Command(BaseCommand):
         parser.add_argument(
             '--app-type',
             type=str,
-            help='Tipo de aplicación (android_tv, samsung_tv, lg_tv, set_top_box)'
+            help='Tipo de aplicación (android_tv, samsung_tv, lg_tv, set_top_box, mobile_app, web_player)'
         )
         parser.add_argument(
             '--all',
@@ -24,7 +24,7 @@ class Command(BaseCommand):
     
     def handle(self, *args, **options):
         app_types = [
-            'android_tv', 'samsung_tv', 'lg_tv', 'set_top_box'
+            'android_tv', 'samsung_tv', 'lg_tv', 'set_top_box', 'mobile_app', 'web_player'
         ] if options['all'] else [options['app_type']]
         
         for app_type in app_types:
