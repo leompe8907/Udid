@@ -1,3 +1,4 @@
+from django.utils import timezone
 from rest_framework import serializers
 from django.contrib.auth.hashers import make_password
 from .models import (ListOfSubscriber, ListOfSmartcards, SubscriberLoginInfo, SubscriberInfo, UDIDAuthRequest, AuthAuditLog)
@@ -219,4 +220,60 @@ class LoginSerializer(serializers.Serializer):
         subscriber.save()
         
         attrs['subscriber'] = subscriber
+        return attrs
+    
+class UDIDAssociationSerializer(serializers.Serializer):
+    udid = serializers.CharField(max_length=100)
+    subscriber_code = serializers.CharField(max_length=100)
+    sn = serializers.CharField(max_length=100)
+    operator_id = serializers.CharField(max_length=100)
+    method = serializers.ChoiceField(choices=[('automatic', 'Automatic'), ('manual', 'Manual')], default='automatic')
+
+    def validate(self, attrs):
+        udid = attrs['udid']
+        subscriber_code = attrs['subscriber_code']
+        sn = attrs['sn']
+
+        # Validar existencia de la solicitud de UDID
+        try:
+            udid_request = UDIDAuthRequest.objects.get(udid=udid)
+        except UDIDAuthRequest.DoesNotExist:
+            raise serializers.ValidationError("UDID no encontrado")
+
+        if not udid_request.is_valid():
+            raise serializers.ValidationError("UDID inválido, expirado o con demasiados intentos")
+
+        # ✅ Validar existencia del SN
+        try:
+            subscriber = SubscriberInfo.objects.get(sn=sn)
+        except SubscriberInfo.DoesNotExist:
+            raise serializers.ValidationError("Smartcard SN no encontrada")
+
+        # ✅ Validar que el SN pertenezca al subscriber_code indicado
+        if subscriber.subscriber_code != subscriber_code:
+            raise serializers.ValidationError("Este SN no pertenece al subscriber_code indicado")
+
+        # ✅ Validar que el subscriber esté activado
+        if not subscriber.activated:
+            subscriber.activated = True
+            subscriber.activation_date = timezone.now()
+            subscriber.save()
+
+        # ✅ Validar si la cuenta está bloqueada
+        if subscriber.is_locked():
+            raise serializers.ValidationError("La cuenta del suscriptor está bloqueada")
+
+        # ✅ Verificar que no esté asociado a otro UDID activo
+        conflict_qs = UDIDAuthRequest.objects.filter(
+            sn=sn,
+            subscriber_code=subscriber_code,
+            status__in=['validated', 'used']
+        ).exclude(udid=udid)
+
+        if conflict_qs.exists():
+            raise serializers.ValidationError("Este SN ya está asociado a otro UDID activo")
+
+        # Pasar los objetos validados para usarlos en la vista
+        attrs['subscriber'] = subscriber
+        attrs['udid_request'] = udid_request
         return attrs
