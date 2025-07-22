@@ -15,6 +15,7 @@ import json
 
 from .serializers import UDIDAssociationSerializer
 from .models import UDIDAuthRequest, AuthAuditLog, SubscriberInfo, AppCredentials, EncryptedCredentialsLog, ListOfSubscriber, ListOfSmartcards
+from .management.commands.keyGenerator import hybrid_encrypt_for_app
 
 logger = logging.getLogger(__name__)
 
@@ -158,146 +159,140 @@ class ValidateAndAssociateUDIDView(APIView):
     
 class AuthenticateWithUDIDView(APIView):
     permission_classes = [AllowAny]
-    
+
     def post(self, request):
-        """
-        Paso 3: TV envía UDID para obtener credenciales
-        """
+        udid = request.data.get('udid')
+        app_type = request.data.get('app_type', 'android_tv')
+        app_version = request.data.get('app_version', '1.0')
+        client_ip = self.get_client_ip(request)
+
+        if not udid:
+            return Response({"error": "UDID is required"}, status=status.HTTP_400_BAD_REQUEST)
+
         try:
-            udid = request.data.get('udid')
-            app_type = request.data.get('app_type', 'android_tv')
-            app_version = request.data.get('app_version', '1.0')
-            device_fingerprint = request.data.get('device_fingerprint')
-            
-            if not udid:
-                return Response({
-                    "error": "UDID is required"
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
             with transaction.atomic():
-                # Buscar la solicitud UDID
                 try:
-                    auth_request = UDIDAuthRequest.objects.get(udid=udid)
+                    req = UDIDAuthRequest.objects.select_for_update().get(udid=udid)
                 except UDIDAuthRequest.DoesNotExist:
+                    return Response({"error": "Invalid UDID"}, status=status.HTTP_404_NOT_FOUND)
+
+                if req.status != 'validated':
+                    return Response({"error": f"UDID not valid. Status: {req.status}"}, status=status.HTTP_403_FORBIDDEN)
+
+                if req.is_expired():
+                    req.status = 'expired'
+                    req.save()
+                    return Response({"error": "UDID has expired"}, status=status.HTTP_403_FORBIDDEN)
+
+                try:
+                    subscriber = SubscriberInfo.objects.get(subscriber_code=req.subscriber_code, sn=req.sn)
+                except SubscriberInfo.DoesNotExist:
+                    return Response({"error": "Subscriber info not found or mismatched SN"}, status=status.HTTP_404_NOT_FOUND)
+
+                credentials_payload = {
+                    "subscriber_code": subscriber.subscriber_code,
+                    "sn": subscriber.sn,
+                    "login1": subscriber.login1,
+                    "login2": subscriber.login2,
+                    "password": subscriber.get_password(),
+                    "pin": subscriber.get_pin(),
+                    "packages": subscriber.packages,
+                    "products": subscriber.products,
+                    "timestamp": timezone.now().isoformat()
+                }
+
+                # Obtener AppCredentials válidas
+                try:
+                    app_credentials = AppCredentials.objects.get(
+                        app_type=app_type,
+                        app_version=app_version,
+                        is_active=True
+                    )
+                    if not app_credentials.is_usable():
+                        raise AppCredentials.DoesNotExist()
+                except AppCredentials.DoesNotExist:
+                    app_credentials = AppCredentials.objects.filter(
+                        app_type=app_type,
+                        is_active=True,
+                        is_compromised=False
+                    ).order_by('-created_at').first()
+                    if not app_credentials:
+                        return Response({
+                            "error": f"No valid app credentials available for app_type='{app_type}'",
+                            "solution": "Contact administrator"
+                        }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+                # Encriptar credenciales
+                try:
+                    encrypted_result = hybrid_encrypt_for_app(
+                        json.dumps(credentials_payload), app_type
+                    )
+                except Exception as e:
                     return Response({
-                        "error": "Invalid UDID"
-                    }, status=status.HTTP_404_NOT_FOUND)
-                
-                # Validar que esté validada y no expirada
-                if auth_request.status != 'validated' or auth_request.is_expired():
-                    return Response({
-                        "error": "UDID not validated or expired"
-                    }, status=status.HTTP_400_BAD_REQUEST)
-                
-                # Obtener credenciales del subscriber
-                credentials = self.get_subscriber_credentials(auth_request.subscriber_code)
-                if not credentials:
-                    return Response({
-                        "error": "Subscriber credentials not found"
-                    }, status=status.HTTP_404_NOT_FOUND)
-                
-                # Obtener credenciales de la app para encriptar
-                app_credentials = self.get_app_credentials(app_type, app_version)
-                if not app_credentials:
-                    return Response({
-                        "error": "App credentials not found"
-                    }, status=status.HTTP_404_NOT_FOUND)
-                
-                # Encriptar credenciales (implementar según tu sistema de encriptación)
-                encrypted_payload = self.encrypt_credentials(credentials, app_credentials)
-                
-                # Marcar UDID como usado
-                auth_request.mark_as_used()
-                auth_request.app_type = app_type
-                auth_request.app_version = app_version
-                auth_request.device_fingerprint = device_fingerprint
-                auth_request.mark_credentials_delivered(app_credentials)
-                
+                        "error": "Encryption failed",
+                        "details": str(e)
+                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+                # Marcar como entregado
+                req.app_type = app_type
+                req.app_version = app_version
+                req.app_credentials_used = app_credentials
+                req.mark_credentials_delivered(app_credentials)
+                req.mark_as_used()
+
                 # Log de auditoría
                 AuthAuditLog.objects.create(
                     action_type='udid_used',
-                    udid=udid,
-                    subscriber_code=auth_request.subscriber_code,
-                    client_ip=self.get_client_ip(request),
+                    udid=req.udid,
+                    subscriber_code=req.subscriber_code,
+                    client_ip=client_ip,
+                    user_agent=request.META.get('HTTP_USER_AGENT', ''),
                     details={
-                        'app_type': app_type,
-                        'app_version': app_version,
-                        'device_fingerprint': device_fingerprint
+                        "sn_assigned": subscriber.sn,
+                        "app_type": app_type,
+                        "app_version": app_version,
+                        "encryption_method": "Hybrid AES-256 + RSA-OAEP",
+                        "key_fingerprint": app_credentials.key_fingerprint
                     }
                 )
-                
-                # Log de credenciales encriptadas
+
+                # Log de credenciales cifradas
+                encrypted_hash = hashlib.sha256(
+                    encrypted_result["encrypted_data"].encode()
+                ).hexdigest()
+
                 EncryptedCredentialsLog.objects.create(
-                    udid=udid,
-                    subscriber_code=auth_request.subscriber_code,
-                    sn=auth_request.sn,
+                    udid=req.udid,
+                    subscriber_code=req.subscriber_code,
+                    sn=req.sn,
                     app_type=app_type,
                     app_version=app_version,
                     app_credentials_id=app_credentials,
-                    encrypted_data_hash=hashlib.sha256(encrypted_payload.encode()).hexdigest(),
-                    client_ip=self.get_client_ip(request),
+                    encrypted_data_hash=encrypted_hash,
+                    client_ip=client_ip,
+                    user_agent=request.META.get('HTTP_USER_AGENT', ''),
                     delivered_successfully=True
                 )
-                
+
                 return Response({
-                    "encrypted_credentials": encrypted_payload,
-                    "app_type": app_type,
-                    "expires_at": auth_request.expires_at
+                    "encrypted_credentials": encrypted_result,
+                    "security_info": {
+                        "encryption_method": "Hybrid AES-256 + RSA-OAEP",
+                        "app_type": app_type,
+                        "app_version": app_credentials.app_version,
+                        "key_fingerprint": app_credentials.key_fingerprint
+                    },
+                    "expires_at": req.expires_at
                 }, status=status.HTTP_200_OK)
-                
+
         except Exception as e:
             return Response({
-                "error": "Internal server error"
+                "error": "Internal server error",
+                "details": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
-    def get_subscriber_credentials(self, subscriber_code):
-        """Obtener credenciales del subscriber"""
-        try:
-            subscriber_info = SubscriberInfo.objects.get(
-                subscriber_code=subscriber_code,
-                activated=True
-            )
-            
-            return {
-                'subscriber_code': subscriber_code,
-                'login1': subscriber_info.login1,
-                'login2': subscriber_info.login2,
-                'password': subscriber_info.get_password(),
-                'pin': subscriber_info.get_pin(),
-                'sn': subscriber_info.sn,
-                'packages': subscriber_info.packages,
-                'products': subscriber_info.products
-            }
-            
-        except SubscriberInfo.DoesNotExist:
-            return None
-    
-    def get_app_credentials(self, app_type, app_version):
-        """Obtener credenciales de la aplicación"""
-        try:
-            return AppCredentials.objects.get(
-                app_type=app_type,
-                app_version=app_version,
-                is_active=True
-            )
-        except AppCredentials.DoesNotExist:
-            return None
-    
-    def encrypt_credentials(self, credentials, app_credentials):
-        """
-        Encriptar credenciales usando las claves de la app
-        TODO: Implementar encriptación real con RSA + AES
-        """
-        # Por ahora retornamos JSON base64 (implementar encriptación real)
-        import base64
-        json_data = json.dumps(credentials)
-        return base64.b64encode(json_data.encode()).decode()
-    
+
     def get_client_ip(self, request):
-        """Obtener IP real del cliente"""
         x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
         if x_forwarded_for:
-            ip = x_forwarded_for.split(',')[0]
-        else:
-            ip = request.META.get('REMOTE_ADDR')
-        return ip
+            return x_forwarded_for.split(',')[0]
+        return request.META.get('REMOTE_ADDR')
