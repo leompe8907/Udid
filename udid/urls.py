@@ -1,6 +1,6 @@
 from django.urls import path
 from .automatico import RequestUDIDView, ValidateUDIDView, GetSubscriberInfoView, RevokeUDIDView, ListUDIDRequestsView
-from .views import RequestUDIDManualView, ValidateAndAssociateUDIDView, AuthenticateWithUDIDView
+from .views import RequestUDIDManualView, ValidateAndAssociateUDIDView, AuthenticateWithUDIDView, DisassociateUDIDView
 
 
 urlpatterns = [
@@ -17,4 +17,5 @@ urlpatterns = [
     path('request-udid-manual/', RequestUDIDManualView.as_view(), name='request-udid-manual'),
     path('validate-and-associate-udid/', ValidateAndAssociateUDIDView.as_view(), name='validate-and-associate-udid'),
     path('authenticate-with-udid/', AuthenticateWithUDIDView.as_view(), name='authenticate-with-udid'),
+    path('disassociate-udid/', DisassociateUDIDView.as_view(), name='disassociate-udid'),
 ]

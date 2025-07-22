@@ -296,3 +296,71 @@ class AuthenticateWithUDIDView(APIView):
         if x_forwarded_for:
             return x_forwarded_for.split(',')[0]
         return request.META.get('REMOTE_ADDR')
+
+class DisassociateUDIDView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        """
+        Paso 4: Desasociar el SN vinculado a un UDID específico
+        """
+        udid = request.data.get('udid')
+        operator_id = request.data.get('operator_id')
+        reason = request.data.get('reason', 'Voluntary disassociation')
+
+        if not udid:
+            return Response({"error": "UDID is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                try:
+                    req = UDIDAuthRequest.objects.select_for_update().get(udid=udid)
+                except UDIDAuthRequest.DoesNotExist:
+                    return Response({"error": "UDID not found"}, status=status.HTTP_404_NOT_FOUND)
+
+                if req.status != 'used':
+                    return Response({
+                        "error": f"Cannot disassociate: UDID is in state '{req.status}'"
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                if not req.sn:
+                    return Response({
+                        "error": "No SN is currently associated with this UDID"
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                # Guardar estado anterior
+                old_sn = req.sn
+
+                # Desasociar y marcar como revocado
+                req.sn = None
+                req.status = 'revoked'
+                req.revoked_at = timezone.now()
+                req.revoked_reason = reason
+                req.save()
+
+                # Log de auditoría
+                AuthAuditLog.objects.create(
+                    action_type='udid_revoked',
+                    udid=req.udid,
+                    subscriber_code=req.subscriber_code,
+                    operator_id=operator_id,
+                    client_ip=request.META.get('REMOTE_ADDR'),
+                    user_agent=request.META.get('HTTP_USER_AGENT', ''),
+                    details={
+                        "old_sn": old_sn,
+                        "revoked_at": timezone.now().isoformat(),
+                        "reason": reason
+                    }
+                )
+
+                return Response({
+                    "message": f"UDID {req.udid} was successfully disassociated",
+                    "revoked_at": req.revoked_at,
+                    "subscriber_code": req.subscriber_code,
+                }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return Response({
+                "error": "Internal server error",
+                "details": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
