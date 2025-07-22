@@ -1,7 +1,10 @@
-from rest_framework import status
+from rest_framework import status, filters
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny
+
+from django_filters.rest_framework import DjangoFilterBackend
 
 from django.utils import timezone
 from django.db import transaction
@@ -13,7 +16,7 @@ import secrets
 import hashlib
 import json
 
-from .serializers import UDIDAssociationSerializer
+from .serializers import UDIDAssociationSerializer, PublicSubscriberInfoSerializer
 from .models import UDIDAuthRequest, AuthAuditLog, SubscriberInfo, AppCredentials, EncryptedCredentialsLog, ListOfSubscriber, ListOfSmartcards
 from .management.commands.keyGenerator import hybrid_encrypt_for_app
 
@@ -364,3 +367,19 @@ class DisassociateUDIDView(APIView):
                 "error": "Internal server error",
                 "details": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class ListAllSubscribersView(ListAPIView):
+    permission_classes = [AllowAny]
+    queryset = SubscriberInfo.objects.all().order_by('subscriber_code')
+    serializer_class = PublicSubscriberInfoSerializer
+
+class SubscriberInfoListView(ListAPIView):
+    queryset = SubscriberInfo.objects.all().order_by('subscriber_code')
+    serializer_class = PublicSubscriberInfoSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    
+    # 🔍 Filtros exactos (parámetros: ?subscriber_code=123&sn=XYZ)
+    filterset_fields = ['subscriber_code', 'sn']
+    
+    # 🔎 Búsqueda parcial (parámetro: ?search=juan)
+    search_fields = ['subscriber_code', 'sn', 'login1']

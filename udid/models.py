@@ -1,6 +1,7 @@
 from django.db import models
 from django.utils import timezone
 from datetime import timedelta
+from django.contrib.auth.models import User
 
 import secrets
 import uuid
@@ -420,3 +421,11 @@ class UDIDAuthRequest(models.Model):
     
     def __str__(self):
         return f"UDID Auth: {self.udid} - {self.status}"
+
+class UserProfile(models.Model):
+    id = models.AutoField(primary_key=True)
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    operator_code = models.CharField(max_length=50)
+
+    def __str__(self):
+        return f"{self.user.username} - {self.operator_code}"

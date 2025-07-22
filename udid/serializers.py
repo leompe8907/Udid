@@ -138,8 +138,9 @@ class PublicSubscriberInfoSerializer(serializers.ModelSerializer):
     class Meta:
         model = SubscriberInfo
         fields = [
-            'subscriber_code', 'first_name', 'last_name', 'activated',
-            'products', 'packages', 'packageNames', 'model'
+            'subscriber_code','first_name', 'last_name', 'sn', 'activated',
+            'products', 'packages', 'packageNames', 'model','lastActivation',
+            'lastActivationIP', 'lastServiceListDownload', 'lastActivation'
         ]
 
 class UDIDValidationSerializer(serializers.Serializer):
