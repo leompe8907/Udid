@@ -2,7 +2,7 @@ from rest_framework import status, filters
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.generics import ListAPIView
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 
 from django_filters.rest_framework import DjangoFilterBackend
 
@@ -91,7 +91,7 @@ class RequestUDIDManualView(APIView):
         return ip
 
 class ValidateAndAssociateUDIDView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         serializer = UDIDAssociationSerializer(data=request.data)
@@ -159,7 +159,7 @@ class ValidateAndAssociateUDIDView(APIView):
     def get_client_ip(self, request):
         x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
         return x_forwarded_for.split(',')[0] if x_forwarded_for else request.META.get('REMOTE_ADDR')
-    
+
 class AuthenticateWithUDIDView(APIView):
     permission_classes = [AllowAny]
 
@@ -301,7 +301,7 @@ class AuthenticateWithUDIDView(APIView):
         return request.META.get('REMOTE_ADDR')
 
 class DisassociateUDIDView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         """
@@ -369,11 +369,12 @@ class DisassociateUDIDView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class ListAllSubscribersView(ListAPIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     queryset = SubscriberInfo.objects.all().order_by('subscriber_code')
     serializer_class = PublicSubscriberInfoSerializer
 
 class SubscriberInfoListView(ListAPIView):
+    permission_classes = [IsAuthenticated]
     queryset = SubscriberInfo.objects.all().order_by('subscriber_code')
     serializer_class = PublicSubscriberInfoSerializer
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
