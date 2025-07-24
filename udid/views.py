@@ -6,8 +6,9 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 
 from django_filters.rest_framework import DjangoFilterBackend
 
-from django.utils import timezone
 from django.db import transaction
+from django.utils import timezone
+from django.core.paginator import Paginator
 
 from datetime import timedelta
 
@@ -16,9 +17,10 @@ import secrets
 import hashlib
 import json
 
-from .serializers import UDIDAssociationSerializer, PublicSubscriberInfoSerializer
-from .models import UDIDAuthRequest, AuthAuditLog, SubscriberInfo, AppCredentials, EncryptedCredentialsLog, ListOfSubscriber, ListOfSmartcards
 from .management.commands.keyGenerator import hybrid_encrypt_for_app
+from .serializers import UDIDAssociationSerializer, PublicSubscriberInfoSerializer
+from .util import get_client_ip, compute_encrypted_hash, json_serialize_credentials, is_valid_app_type
+from .models import UDIDAuthRequest, AuthAuditLog, SubscriberInfo, AppCredentials, EncryptedCredentialsLog
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +33,7 @@ class RequestUDIDManualView(APIView):
         """
         try:
             # Rate limiting básico por IP
-            client_ip = self.get_client_ip(request)
+            client_ip = get_client_ip(request)
             recent_requests = UDIDAuthRequest.objects.filter(
                 client_ip=client_ip,
                 created_at__gte=timezone.now() - timedelta(minutes=5)
@@ -80,15 +82,6 @@ class RequestUDIDManualView(APIView):
             udid = secrets.token_hex(4)  # 8 caracteres hexadecimales
             if not UDIDAuthRequest.objects.filter(udid=udid).exists():
                 return udid
-    
-    def get_client_ip(self, request):
-        """Obtener IP real del cliente"""
-        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
-        if x_forwarded_for:
-            ip = x_forwarded_for.split(',')[0]
-        else:
-            ip = request.META.get('REMOTE_ADDR')
-        return ip
 
 class ValidateAndAssociateUDIDView(APIView):
     permission_classes = [IsAuthenticated]
@@ -126,12 +119,12 @@ class ValidateAndAssociateUDIDView(APIView):
 
     def associate_udid_with_subscriber(self, auth_request, subscriber, sn, operator_id, request):
         now = timezone.now()
-        client_ip = self.get_client_ip(request)
+        client_ip = get_client_ip(request)
         user_agent = request.META.get('HTTP_USER_AGENT', '')
 
         auth_request.subscriber_code = subscriber.subscriber_code
         auth_request.sn = sn
-        auth_request.status = 'used'
+        auth_request.status = 'validated'
         auth_request.validated_at = now
         auth_request.used_at = now
         auth_request.validated_by_operator = operator_id
@@ -156,10 +149,6 @@ class ValidateAndAssociateUDIDView(APIView):
             }
         )
 
-    def get_client_ip(self, request):
-        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
-        return x_forwarded_for.split(',')[0] if x_forwarded_for else request.META.get('REMOTE_ADDR')
-
 class AuthenticateWithUDIDView(APIView):
     permission_classes = [AllowAny]
 
@@ -167,7 +156,7 @@ class AuthenticateWithUDIDView(APIView):
         udid = request.data.get('udid')
         app_type = request.data.get('app_type', 'android_tv')
         app_version = request.data.get('app_version', '1.0')
-        client_ip = self.get_client_ip(request)
+        client_ip = get_client_ip(request)
 
         if not udid:
             return Response({"error": "UDID is required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -228,7 +217,7 @@ class AuthenticateWithUDIDView(APIView):
                 # Encriptar credenciales
                 try:
                     encrypted_result = hybrid_encrypt_for_app(
-                        json.dumps(credentials_payload), app_type
+                        json_serialize_credentials(credentials_payload), app_type
                     )
                 except Exception as e:
                     return Response({
@@ -260,9 +249,7 @@ class AuthenticateWithUDIDView(APIView):
                 )
 
                 # Log de credenciales cifradas
-                encrypted_hash = hashlib.sha256(
-                    encrypted_result["encrypted_data"].encode()
-                ).hexdigest()
+                encrypted_hash = compute_encrypted_hash(encrypted_result['encrypted_data'])
 
                 EncryptedCredentialsLog.objects.create(
                     udid=req.udid,
@@ -293,12 +280,6 @@ class AuthenticateWithUDIDView(APIView):
                 "error": "Internal server error",
                 "details": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    def get_client_ip(self, request):
-        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
-        if x_forwarded_for:
-            return x_forwarded_for.split(',')[0]
-        return request.META.get('REMOTE_ADDR')
 
 class DisassociateUDIDView(APIView):
     permission_classes = [IsAuthenticated]
@@ -368,10 +349,66 @@ class DisassociateUDIDView(APIView):
                 "details": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-class ListAllSubscribersView(ListAPIView):
+class ListSubscribersWithUDIDView(APIView):
     permission_classes = [IsAuthenticated]
-    queryset = SubscriberInfo.objects.all().order_by('subscriber_code')
-    serializer_class = PublicSubscriberInfoSerializer
+    """
+    Devuelve una lista paginada de suscriptores con información de UDID si aplica.
+    """
+    def get(self, request):
+        try:
+            page_number = request.query_params.get('page', 1)
+            page_size = request.query_params.get('page_size', 10)
+
+            subscribers = SubscriberInfo.objects.all().order_by('subscriber_code')
+            paginator = Paginator(subscribers, page_size)
+            page_obj = paginator.get_page(page_number)
+
+            data = []
+            for subscriber in page_obj.object_list:
+                udid_info = UDIDAuthRequest.objects.filter(
+                    subscriber_code=subscriber.subscriber_code,
+                    sn=subscriber.sn,
+                    status__in=['validated','used', 'revoked']
+                ).order_by('-validated_at').first()
+
+                data.append({
+                    # Campos del Subscriber
+                    "subscriber_code": subscriber.subscriber_code,
+                    "first_name": subscriber.first_name,
+                    "last_name": subscriber.last_name,
+                    "sn": subscriber.sn,
+                    "activated": subscriber.activated,
+                    "products": subscriber.products,
+                    "packages": subscriber.packages,
+                    "packageNames": subscriber.packageNames,
+                    "model": subscriber.model,
+                    "lastActivation": subscriber.lastActivation,
+                    "lastActivationIP": subscriber.lastActivationIP,
+                    "lastServiceListDownload": subscriber.lastServiceListDownload,
+
+                    # Campos del UDID (si existe)
+                    "udid": udid_info.udid if udid_info else None,
+                    "udid_status": udid_info.status if udid_info else None,
+                    "created_at": udid_info.created_at if udid_info else None,
+                    "validated_at": udid_info.validated_at if udid_info else None,
+                    "user_agent": udid_info.user_agent if udid_info else None,
+                    "app_type": udid_info.app_type if udid_info else None,
+                    "app_version": udid_info.app_version if udid_info else None,
+                    "method": udid_info.method if udid_info else None,
+                })
+
+            return Response({
+                "count": paginator.count,
+                "total_pages": paginator.num_pages,
+                "current_page": page_obj.number,
+                "results": data
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return Response({
+                "error": "Error al obtener la información",
+                "details": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class SubscriberInfoListView(ListAPIView):
     permission_classes = [IsAuthenticated]

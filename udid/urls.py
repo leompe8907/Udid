@@ -2,7 +2,7 @@ from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
 from .auth import RegisterUserView, LoginView
 from .automatico import RequestUDIDView, ValidateUDIDView, GetSubscriberInfoView, RevokeUDIDView, ListUDIDRequestsView
-from .views import RequestUDIDManualView, ValidateAndAssociateUDIDView, AuthenticateWithUDIDView, DisassociateUDIDView,ListAllSubscribersView
+from .views import RequestUDIDManualView, ValidateAndAssociateUDIDView, AuthenticateWithUDIDView, DisassociateUDIDView,ListSubscribersWithUDIDView
 
 urlpatterns = [
     #* Automatic UDID management
@@ -22,7 +22,7 @@ urlpatterns = [
     
     #* Public UDID management
     # Note: The public UDID management views are implemented in the views module.
-    path('subscriberinfo/',ListAllSubscribersView.as_view(), name='list-subscribers'),
+    path('subscriberinfo/',ListSubscribersWithUDIDView.as_view(), name='list-subscribers'),
     
     #* Funciones de authentication
     # Note: The authentication views are implemented in the auth module.
