@@ -98,10 +98,11 @@ class ValidateAndAssociateUDIDView(APIView):
         udid_request = data['udid_request']
         sn = data['sn']
         operator_id = data['operator_id']
+        method = data['method']
 
         # Asociar el UDID con el suscriptor
         self.associate_udid_with_subscriber(
-            udid_request, subscriber, sn, operator_id, request
+            udid_request, subscriber, sn, operator_id, method, request
         )
 
         logger.info(f"[OK] Asociación exitosa para UDID: {udid_request.udid}")
@@ -117,7 +118,7 @@ class ValidateAndAssociateUDIDView(APIView):
             "validated_by_operator": operator_id
         }, status=status.HTTP_200_OK)
 
-    def associate_udid_with_subscriber(self, auth_request, subscriber, sn, operator_id, request):
+    def associate_udid_with_subscriber(self, auth_request, subscriber, sn, operator_id, method ,request):
         now = timezone.now()
         client_ip = get_client_ip(request)
         user_agent = request.META.get('HTTP_USER_AGENT', '')
@@ -130,6 +131,7 @@ class ValidateAndAssociateUDIDView(APIView):
         auth_request.validated_by_operator = operator_id
         auth_request.client_ip = client_ip
         auth_request.user_agent = user_agent
+        auth_request.method = method
         auth_request.save()
 
         subscriber.last_login = now
@@ -270,7 +272,7 @@ class AuthenticateWithUDIDView(APIView):
                         "encryption_method": "Hybrid AES-256 + RSA-OAEP",
                         "app_type": app_type,
                         "app_version": app_credentials.app_version,
-                        "key_fingerprint": app_credentials.key_fingerprint
+                        # "key_fingerprint": app_credentials.key_fingerprint
                     },
                     "expires_at": req.expires_at
                 }, status=status.HTTP_200_OK)
@@ -302,7 +304,7 @@ class DisassociateUDIDView(APIView):
                 except UDIDAuthRequest.DoesNotExist:
                     return Response({"error": "UDID not found"}, status=status.HTTP_404_NOT_FOUND)
 
-                if req.status != 'used':
+                if req.status not in ['validated', 'used', 'expired']:
                     return Response({
                         "error": f"Cannot disassociate: UDID is in state '{req.status}'"
                     }, status=status.HTTP_400_BAD_REQUEST)
@@ -312,10 +314,10 @@ class DisassociateUDIDView(APIView):
                         "error": "No SN is currently associated with this UDID"
                     }, status=status.HTTP_400_BAD_REQUEST)
 
-                # Guardar estado anterior
                 old_sn = req.sn
+                old_status = req.status
 
-                # Desasociar y marcar como revocado
+                # Cambiar estado y limpiar SN
                 req.sn = None
                 req.status = 'revoked'
                 req.revoked_at = timezone.now()
@@ -332,6 +334,7 @@ class DisassociateUDIDView(APIView):
                     user_agent=request.META.get('HTTP_USER_AGENT', ''),
                     details={
                         "old_sn": old_sn,
+                        "old_status": old_status,
                         "revoked_at": timezone.now().isoformat(),
                         "reason": reason
                     }
@@ -395,6 +398,7 @@ class ListSubscribersWithUDIDView(APIView):
                     "app_type": udid_info.app_type if udid_info else None,
                     "app_version": udid_info.app_version if udid_info else None,
                     "method": udid_info.method if udid_info else None,
+                    "validated_by_operator": udid_info.validated_by_operator if udid_info else None,
                 })
 
             return Response({

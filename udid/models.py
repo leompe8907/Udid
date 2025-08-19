@@ -384,21 +384,59 @@ class UDIDAuthRequest(models.Model):
             self.udid = str(uuid.uuid4())
         if not self.temp_token:
             self.temp_token = secrets.token_urlsafe(32)
+        
+        # ✅ LÓGICA PRINCIPAL: Detener expiración automáticamente
+        old_status = None
+        if self.pk:  # Solo si el objeto ya existe en BD
+            try:
+                old_instance = UDIDAuthRequest.objects.get(pk=self.pk)
+                old_status = old_instance.status
+            except UDIDAuthRequest.DoesNotExist:
+                pass
+        
+        # ✅ Si el status cambió a 'validated' o 'used', detener expiración
+        if old_status and old_status != self.status:
+            if self.status in ['validated', 'used']:
+                self.stop_expiration()
+        
         super().save(*args, **kwargs)
     
     def is_expired(self):
+        """✅ Mejorado: Si está validated o used, nunca expira"""
+        if self.status in ['validated', 'used']:
+            return False
         return timezone.now() > self.expires_at
     
     def is_valid(self):
+        """✅ Mejorado: Considera el estado para determinar validez"""
         return (
             self.status == 'pending' and
             not self.is_expired() and
             self.attempts_count < 5
         )
     
+    def stop_expiration(self):
+        """✅ NUEVA: Detener la expiración del UDID (versión simple)"""
+        # Establecer fecha muy lejana en el futuro
+        self.expires_at = timezone.now() + timedelta(days=3650)
+    
+    def validate_udid(self, operator=None):
+        """✅ NUEVA: Método helper para validar UDID"""
+        if self.status == 'pending' and not self.is_expired():
+            self.status = 'validated'
+            self.validated_at = timezone.now()
+            if operator:
+                self.validated_by_operator = operator
+            # La expiración se detendrá automáticamente en save()
+            self.save()
+            return True
+        return False
+    
     def mark_as_used(self):
+        """✅ MEJORADO: Marcar como usado y detener expiración automáticamente"""
         self.status = 'used'
         self.used_at = timezone.now()
+        # La expiración se detendrá automáticamente en save()
         self.save()
 
     def validate_app_credentials(self):
@@ -422,8 +460,26 @@ class UDIDAuthRequest(models.Model):
         app_credentials.usage_count += 1
         app_credentials.save()
     
+    def get_expiration_info(self):
+        """✅ NUEVA: Información sobre el estado de expiración"""
+        if self.status in ['validated', 'used']:
+            return {
+                'expires': False,
+                'status': self.status,
+                'message': f'UDID {self.status} - expiration stopped'
+            }
+        else:
+            time_left = self.expires_at - timezone.now()
+            return {
+                'expires': True,
+                'expires_at': self.expires_at,
+                'is_expired': self.is_expired(),
+                'time_remaining': time_left if time_left.total_seconds() > 0 else None
+            }
+    
     def __str__(self):
-        return f"UDID Auth: {self.udid} - {self.status}"
+        expiry_info = "∞" if self.status in ['validated', 'used'] else "⏰"
+        return f"UDID Auth: {self.udid} - {self.status} {expiry_info}"
 
 class UserProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
