@@ -9,7 +9,7 @@ class Command(BaseCommand):
         parser.add_argument(
             '--app-type',
             type=str,
-            help='Tipo de aplicación (android_tv, samsung_tv, lg_tv, set_top_box, mobile_app, web_player)'
+            help='Tipo de aplicación (android_tv, android_mobile, 10foot, set_top_box, ios_mobile, ios_tv, web_player)'
         )
         parser.add_argument(
             '--all',
@@ -27,7 +27,7 @@ class Command(BaseCommand):
         
         # Determinar qué tipos de app procesar
         if options['all']:
-            app_types = ['android_tv', 'samsung_tv', 'lg_tv', 'set_top_box', 'mobile_app', 'web_player']
+            app_types = ['android_tv', 'android_mobile', '10foot', 'set_top_box', 'ios_mobile', 'ios_tv', 'web_player']
             self.stdout.write(f"📱 Generando claves para TODOS los tipos de app: {', '.join(app_types)}")
         elif options['app_type']:
             app_types = [options['app_type']]

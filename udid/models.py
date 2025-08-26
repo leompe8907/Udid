@@ -203,10 +203,11 @@ class AuthAuditLog(models.Model):
 class AppCredentials(models.Model):
     APP_TYPES = [
         ('android_tv', 'Android TV'),
-        ('samsung_tv', 'Samsung Smart TV'),
-        ('lg_tv', 'LG Smart TV'),
+        ('android_mobile', 'Android Mobile'),
+        ('10foot', '10 Foot UI'),
         ('set_top_box', 'Set Top Box'),
-        ('mobile_app', 'Mobile App'),
+        ('ios_mobile', 'iOS Mobile'),
+        ('ios_tv', 'Apple TV'),
         ('web_player', 'Web Player'),
     ]
 

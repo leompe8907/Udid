@@ -84,7 +84,7 @@ class RequestUDIDManualView(APIView):
                 return udid
 
 class ValidateAndAssociateUDIDView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def post(self, request):
         serializer = UDIDAssociationSerializer(data=request.data)
@@ -282,6 +282,121 @@ class AuthenticateWithUDIDView(APIView):
                 "error": "Internal server error",
                 "details": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class ValidateStatusUDIDView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        udid = request.data.get('udid')
+        client_ip = get_client_ip(request)
+
+        if not udid:
+            return Response({
+                "error": "UDID is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            req = UDIDAuthRequest.objects.get(udid=udid)
+        except UDIDAuthRequest.DoesNotExist:
+            # ✅ Log del intento con UDID inválido
+            AuthAuditLog.objects.create(
+                action_type='udid_validated',
+                udid=udid,
+                client_ip=client_ip,
+                user_agent=request.META.get('HTTP_USER_AGENT'),
+                details={'error': 'UDID not found'}
+            )
+            return Response({
+                "error": "Invalid UDID"
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # ✅ Verificar si está revocado
+        if req.status == 'revoked':
+            # Log del intento con UDID revocado
+            AuthAuditLog.objects.create(
+                action_type='udid_validated',
+                subscriber_code=req.subscriber_code,
+                udid=udid,
+                client_ip=client_ip,
+                user_agent=request.META.get('HTTP_USER_AGENT'),
+                details={'error': 'UDID revoked'}
+            )
+            return Response({
+                "error": "UDID has been revoked",
+                "status": "revoked"
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        # ✅ NUEVA: Verificar expiración usando la nueva lógica
+        if req.is_expired():
+            # Marcar como expired si no lo está ya
+            if req.status != 'expired':
+                req.status = 'expired'
+                req.save()
+            
+            # Log del intento con UDID expirado
+            AuthAuditLog.objects.create(
+                action_type='udid_validated',
+                subscriber_code=req.subscriber_code,
+                udid=udid,
+                client_ip=client_ip,
+                user_agent=request.META.get('HTTP_USER_AGENT'),
+                details={'error': 'UDID expired'}
+            )
+            return Response({
+                "error": "UDID has expired",
+                "status": "expired"
+            }, status=status.HTTP_410_GONE)
+
+        # ✅ NUEVA: Obtener información detallada de expiración
+        expiration_info = req.get_expiration_info()
+        
+        # ✅ Preparar respuesta con información completa
+        response_data = {
+            "udid": udid,
+            "status": req.status,
+            "subscriber_code": req.subscriber_code,
+            "sn": req.sn,
+            "valid": req.is_valid(),
+            "expiration": expiration_info
+        }
+
+        # ✅ Agregar información específica según el estado
+        if req.status == 'validated':
+            response_data.update({
+                "validated_at": req.validated_at,
+                "validated_by": req.validated_by_operator
+            })
+        elif req.status == 'used':
+            response_data.update({
+                "used_at": req.used_at,
+                "credentials_delivered": req.credentials_delivered
+            })
+        elif req.status == 'pending':
+            # Solo para pending, mostrar tiempo restante
+            if expiration_info.get('time_remaining'):
+                response_data["time_remaining_seconds"] = int(
+                    expiration_info['time_remaining'].total_seconds()
+                )
+
+        # ✅ Log de validación exitosa
+        AuthAuditLog.objects.create(
+            action_type='udid_validated',
+            subscriber_code=req.subscriber_code,
+            udid=udid,
+            client_ip=client_ip,
+            user_agent=request.META.get('HTTP_USER_AGENT'),
+            details={
+                'status': req.status,
+                'validation_successful': True
+            }
+        )
+
+        # ✅ Actualizar contador de intentos si está pending
+        if req.status == 'pending':
+            req.attempts_count += 1
+            req.save()
+
+        return Response(response_data, status=status.HTTP_200_OK)
 
 class DisassociateUDIDView(APIView):
     permission_classes = [IsAuthenticated]
