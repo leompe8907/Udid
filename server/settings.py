@@ -31,7 +31,8 @@ SECRET_KEY = DjangoConfig.SECRET_KEY
 #* SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = DjangoConfig.DEBUG
 
-ALLOWED_HOSTS = DjangoConfig.ALLOWED_HOSTS
+#ALLOWED_HOSTS = DjangoConfig.ALLOWED_HOSTS
+ALLOWED_HOSTS = ['*']
 
 #* Application definition
 
@@ -46,9 +47,22 @@ INSTALLED_APPS = [
     'rest_framework',
     'django_cron',
     'django_filters',
+    "channels",
     'udid',
     
 ]
+
+# Configuración de Channels
+ASGI_APPLICATION = 'server.asgi.application'
+
+# Channel layer con Redis
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {"hosts": [("127.0.0.1", 6379)]},
+    }
+}
+
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
