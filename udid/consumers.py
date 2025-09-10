@@ -17,9 +17,9 @@ class AuthWaitWS(AsyncWebsocketConsumer):
     """
     Protocolo:
       -> {"type":"auth_with_udid","udid":"...","app_type":"android_tv","app_version":"1.0"}
-      <- Si ya está validated: {"type":"auth_with_udid:result","status":"ok","result":{...}} y cierra
-      <- Si no está validated: {"type":"pending","status":"not_validated","timeout":...} y queda esperando.
-         Cuando otra parte marque validated y dispare el evento de grupo "udid.validated",
+      <- Si ya está validated: {"type":"auth_with_udid:result","status":"ok","result":{...}} y cierra.
+      <- Si no está validated o está validated pero sin asociación: {"type":"pending",...} y queda esperando.
+         Cuando otra parte marque validated (y asociada) y dispare el evento de grupo "udid.validated",
          se vuelve a invocar el servicio, se envían credenciales cifradas y se cierra.
     """
     TIMEOUT_SECONDS = getattr(settings, "UDID_WAIT_TIMEOUT", 600)
@@ -53,7 +53,7 @@ class AuthWaitWS(AsyncWebsocketConsumer):
         client_ip = (self.scope.get("client") or [""])[0] or ""
         user_agent = _get_header(self.scope, "user-agent")
 
-        # 1) Intento inmediato: si ya está validated, respondemos y cerramos
+        # 1) Intento inmediato: si ya está validated Y asociado, respondemos y cerramos
         res = await sync_to_async(authenticate_with_udid_service)(
             udid=self.udid,
             app_type=self.app_type,
@@ -65,13 +65,16 @@ class AuthWaitWS(AsyncWebsocketConsumer):
             await self._send_result(res)
             return await self.close()
 
-        # Errores que no se resuelven “esperando”
-        fatal_codes = {"invalid_udid", "expired", "subscriber_not_found", "no_app_credentials", "encryption_failed"}
+        # ❗Errores que NO se resuelven esperando (fatales)
+        # NOTA: 'not_associated' NO es fatal; permite esperar a que se complete la asociación.
+        fatal_codes = {
+            "invalid_udid", "expired", "subscriber_not_found", "no_app_credentials", "encryption_failed"
+        }
         if res.get("code") in fatal_codes:
             await self._send_result(res, status="error")
             return await self.close()
 
-        # 2) No está validated aún → suscribirse al grupo y esperar evento
+        # 2) No está listo aún → suscribirse al grupo y esperar evento
         self.group_name = f"udid_{self.udid}"
         try:
             await self.channel_layer.group_add(self.group_name, self.channel_name)
@@ -82,7 +85,7 @@ class AuthWaitWS(AsyncWebsocketConsumer):
 
         await self._send_json({
             "type": "pending",
-            "status": res.get("status") or "not_validated",
+            "status": res.get("status") or "not_validated",  # 'validated' si es not_associated
             "detail": res.get("error") or "Esperando validación de UDID…",
             "timeout": self.TIMEOUT_SECONDS,
         })
@@ -90,12 +93,12 @@ class AuthWaitWS(AsyncWebsocketConsumer):
         # Timeout de espera (no dejamos sockets abiertos indefinidos)
         self.timeout_task = asyncio.create_task(self._timeout())
 
-        # (Opcional) Polling suave como red de seguridad — desactivado por defecto
+        # (Opcional) Polling de respaldo (desactivado por defecto)
         # self.poll_task = asyncio.create_task(self._poll_every(2))
 
-    # Handler para eventos del grupo: name -> dots reemplazados por underscore
+    # Handler del evento de grupo "udid.validated" → udid_validated
     async def udid_validated(self, event):
-        """Recibe {'type': 'udid.validated', 'udid': <udid>} desde la vista que valida."""
+        """Recibe {'type': 'udid.validated', 'udid': <udid>} desde la vista que valida/asocia."""
         if self.done or not self.udid or event.get("udid") != self.udid:
             return
 
@@ -148,7 +151,7 @@ class AuthWaitWS(AsyncWebsocketConsumer):
     async def _timeout(self):
         await asyncio.sleep(self.TIMEOUT_SECONDS)
         if not self.done:
-            await self._send_json({"type": "timeout", "detail": "No se recibió validación a tiempo."})
+            await self._send_json({"type": "timeout", "detail": "No se recibió validación/asociación a tiempo."})
             await self._finish()
 
     async def _poll_every(self, seconds: int):
@@ -156,7 +159,7 @@ class AuthWaitWS(AsyncWebsocketConsumer):
         try:
             while not self.done:
                 await asyncio.sleep(seconds)
-                # Aquí podrías reconsultar un flag simple; úsalo solo si es necesario.
+                # aquí podrías reconsultar un flag simple para cortar antes del timeout si ya está listo
         except asyncio.CancelledError:
             pass
 

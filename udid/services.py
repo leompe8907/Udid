@@ -1,3 +1,4 @@
+# udid/services.py
 from django.db import transaction
 from django.utils import timezone
 
@@ -22,22 +23,8 @@ def authenticate_with_udid_service(
     user_agent: str = "",
 ) -> dict:
     """
-    Devuelve:
-      ok=True:
-        {
-          "ok": True,
-          "encrypted_credentials": {...},
-          "security_info": {...},
-          "expires_at": <datetime>,
-        }
-
-      ok=False:
-        {
-          "ok": False,
-          "error": "<mensaje legible>",
-          "code":  "<código estable>",
-          "status": "<estado actual del UDID (opcional)>"
-        }
+    Lógica de negocio pura para acreditar por UDID y emitir credenciales cifradas.
+    Retorna dict serializable a JSON.
     """
     if not udid:
         return {"ok": False, "error": "UDID is required", "code": "missing_udid"}
@@ -50,7 +37,7 @@ def authenticate_with_udid_service(
             except UDIDAuthRequest.DoesNotExist:
                 return {"ok": False, "error": "Invalid UDID", "code": "invalid_udid"}
 
-            # 2) Estado y expiración
+            # 2) Expiración y estado
             if req.is_expired():
                 if req.status != "expired":
                     req.status = "expired"
@@ -66,16 +53,25 @@ def authenticate_with_udid_service(
                 )
                 return {"ok": False, "error": "UDID has expired", "code": "expired", "status": "expired"}
 
-            # if req.status != "validated":
-            #     # Si aún no está validado, informamos pero NO es fatal: el WS puede esperar este estado.
-            #     return {
-            #         "ok": False,
-            #         "error": f"UDID not valid. Status: {req.status}",
-            #         "code": "not_validated",
-            #         "status": req.status,
-            #     }
+            if req.status != "validated":
+                # Aún no validado: NO fatal → WS puede esperar
+                return {
+                    "ok": False,
+                    "error": f"UDID not valid. Status: {req.status}",
+                    "code": "not_validated",
+                    "status": req.status,
+                }
 
-            # 3) Subscriber asociado (según tu vista: subscriber_code + sn)
+            # ✅ NUEVO: Validado pero SIN asociación completa → NO fatal, esperar
+            if not getattr(req, "subscriber_code", None) or not getattr(req, "sn", None):
+                return {
+                    "ok": False,
+                    "error": "UDID validated but not associated to subscriber yet",
+                    "code": "not_associated",
+                    "status": "validated",
+                }
+
+            # 3) Subscriber asociado (si falta en BD, eso sí es fatal)
             try:
                 subscriber = SubscriberInfo.objects.get(
                     subscriber_code=req.subscriber_code, sn=req.sn
@@ -189,7 +185,7 @@ def authenticate_with_udid_service(
                     "app_version": getattr(app_credentials, "app_version", app_version),
                     # "key_fingerprint": getattr(app_credentials, "key_fingerprint", None),
                 },
-                "expires_at": req.expires_at,
+                "expires_at": req.expires_at.isoformat() if getattr(req, "expires_at", None) else None,
             }
 
     except Exception as e:

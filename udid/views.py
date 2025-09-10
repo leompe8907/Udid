@@ -1,5 +1,5 @@
-from rest_framework import status, filters
 from rest_framework.views import APIView
+from rest_framework import status, filters
 from rest_framework.response import Response
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -9,6 +9,10 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction
 from django.utils import timezone
 from django.core.paginator import Paginator
+
+from asgiref.sync import async_to_sync
+
+from channels.layers import get_channel_layer
 
 from datetime import timedelta
 
@@ -94,19 +98,44 @@ class ValidateAndAssociateUDIDView(APIView):
             return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
         
         data = serializer.validated_data
-        subscriber = data['subscriber']
-        udid_request = data['udid_request']
-        sn = data['sn']
-        operator_id = data['operator_id']
-        method = data['method']
+        subscriber   = data["subscriber"]
+        udid_request = data["udid_request"]   # instancia ya validada por el serializer
+        sn           = data["sn"]
+        operator_id  = data["operator_id"]
+        method       = data["method"]
 
-        # Asociar el UDID con el suscriptor
-        self.associate_udid_with_subscriber(
-            udid_request, subscriber, sn, operator_id, method, request
-        )
+        # Hacemos todo atómicamente y notificamos al WS SOLO tras el commit
+        with transaction.atomic():
+            # Bloqueo optimista de la fila del request
+            udid_request = UDIDAuthRequest.objects.select_for_update().get(pk=udid_request.pk)
+
+            # Asociar y marcar como validated (auditoría adentro)
+            self.associate_udid_with_subscriber(
+                udid_request, subscriber, sn, operator_id, method, request
+            )
+
+            udid = udid_request.udid
+
+            # Notificar a los WebSockets que esperan este UDID: al commit
+            def _notify():
+                try:
+                    channel_layer = get_channel_layer()
+                    if channel_layer:
+                        async_to_sync(channel_layer.group_send)(
+                            f"udid_{udid}",              # 👈 mismo group que usa el consumer
+                            {"type": "udid.validated", "udid": udid}  # 👈 llama a AuthWaitWS.udid_validated
+                        )
+                        logger.info("🔔 Notificado udid.validated para %s", udid)
+                    else:
+                        logger.warning("⚠️ Channel layer no disponible; no se notificó udid %s", udid)
+                except Exception as e:
+                    logger.exception("Error notificando WebSocket para udid %s: %s", udid, e)
+
+            transaction.on_commit(_notify)
 
         logger.info(f"[OK] Asociación exitosa para UDID: {udid_request.udid}")
 
+        # DRF serializa datetime a ISO automáticamente en Response
         return Response({
             "message": "UDID validated and associated successfully",
             "udid": udid_request.udid,
@@ -118,37 +147,40 @@ class ValidateAndAssociateUDIDView(APIView):
             "validated_by_operator": operator_id
         }, status=status.HTTP_200_OK)
 
-    def associate_udid_with_subscriber(self, auth_request, subscriber, sn, operator_id, method ,request):
+    def associate_udid_with_subscriber(self, auth_request, subscriber, sn, operator_id, method, request):
         now = timezone.now()
-        client_ip = get_client_ip(request)
-        user_agent = request.META.get('HTTP_USER_AGENT', '')
+        client_ip  = get_client_ip(request)
+        user_agent = request.META.get("HTTP_USER_AGENT", "")
 
-        auth_request.subscriber_code = subscriber.subscriber_code
-        auth_request.sn = sn
-        auth_request.status = 'validated'
-        auth_request.validated_at = now
-        auth_request.used_at = now
+        # Marcar asociación y validación en el request
+        auth_request.subscriber_code       = subscriber.subscriber_code
+        auth_request.sn                    = sn
+        auth_request.status                = "validated"
+        auth_request.validated_at          = now
+        auth_request.used_at               = now
         auth_request.validated_by_operator = operator_id
-        auth_request.client_ip = client_ip
-        auth_request.user_agent = user_agent
-        auth_request.method = method
+        auth_request.client_ip             = client_ip
+        auth_request.user_agent            = user_agent
+        auth_request.method                = method
         auth_request.save()
 
+        # Marcar actividad del suscriptor (si corresponde)
         subscriber.last_login = now
-        subscriber.save()
+        subscriber.save(update_fields=["last_login"])
 
+        # Auditoría
         AuthAuditLog.objects.create(
-            action_type='udid_used',
+            action_type="udid_used",
             udid=auth_request.udid,
             subscriber_code=subscriber.subscriber_code,
             operator_id=operator_id,
             client_ip=client_ip,
             user_agent=user_agent,
             details={
-                'subscriber_name': f"{subscriber.first_name} {subscriber.last_name}".strip(),
-                'smartcard_sn': sn,
-                'validation_timestamp': now.isoformat()
-            }
+                "subscriber_name": f"{subscriber.first_name} {subscriber.last_name}".strip(),
+                "smartcard_sn": sn,
+                "validation_timestamp": now.isoformat(),
+            },
         )
 
 class AuthenticateWithUDIDView(APIView):
