@@ -1,8 +1,7 @@
 # udid/routing.py
 from django.urls import path
-from .consumers import EchoConsumer, RoomConsumer
+from .consumers import AuthWaitWS
 
 websocket_urlpatterns = [
-    path("ws/test/", EchoConsumer.as_asgi()),
-    path("ws/room/<str:room>/", RoomConsumer.as_asgi()),
+    path("ws/auth/", AuthWaitWS.as_asgi()),
 ]
