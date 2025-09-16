@@ -10,9 +10,10 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.1/ref/settings/
 """
 
+import os
+#import dj_database_url
 from pathlib import Path
 from datetime import timedelta
-#import dj_database_url
 
 from config import DjangoConfig
 
@@ -63,6 +64,14 @@ CHANNEL_LAYERS = {
     }
 }
 
+# Tiempo máximo de espera del WS antes de responder "timeout" (segundos)
+UDID_WAIT_TIMEOUT = int(os.getenv("UDID_WAIT_TIMEOUT", "600"))  # 10 min
+
+# Si querés habilitar un polling de respaldo (además del evento push)
+UDID_ENABLE_POLLING = os.getenv("UDID_ENABLE_POLLING", "0") == "1"
+UDID_POLL_INTERVAL = int(os.getenv("UDID_POLL_INTERVAL", "2"))
+
+
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
@@ -76,6 +85,8 @@ MIDDLEWARE = [
 ]
 
 ROOT_URLCONF = 'server.urls'
+
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 TEMPLATES = [
     {
@@ -98,6 +109,10 @@ WSGI_APPLICATION = 'server.wsgi.application'
 
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
+
+# DATABASES = {
+#     'default': dj_database_url.config()
+# }
 
 DATABASES = {
     'default': {
@@ -156,11 +171,11 @@ CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 
 # DjangoConfig.CORS_ORIGIN_WHITELIST
-# CORS_ORIGIN_WHITELIST = [
-#     'http://localhost:8000',
-#     'http://127.0.0.1:8000',
-#     'http://localhost:3000',
-# ]
+CORS_ORIGIN_WHITELIST = [
+    'http://localhost:8000',
+    'http://127.0.0.1:8000',
+    'http://localhost:3000',
+]
 
 CORS_ALLOW_HEADERS = [
     'authorization',

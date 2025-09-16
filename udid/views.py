@@ -6,6 +6,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 
 from django_filters.rest_framework import DjangoFilterBackend
 
+from django.db.models import Q
 from django.db import transaction
 from django.utils import timezone
 from django.core.paginator import Paginator
@@ -94,7 +95,7 @@ class ValidateAndAssociateUDIDView(APIView):
         serializer = UDIDAssociationSerializer(data=request.data)
         
         if not serializer.is_valid():
-            logger.warning(f"❌ Datos inválidos: {serializer.errors}")
+            logger.warning(f"Datos inválidos: {serializer.errors}")
             return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
         
         data = serializer.validated_data
@@ -125,9 +126,9 @@ class ValidateAndAssociateUDIDView(APIView):
                             f"udid_{udid}",              # 👈 mismo group que usa el consumer
                             {"type": "udid.validated", "udid": udid}  # 👈 llama a AuthWaitWS.udid_validated
                         )
-                        logger.info("🔔 Notificado udid.validated para %s", udid)
+                        logger.info("Notificado udid.validated para %s", udid)
                     else:
-                        logger.warning("⚠️ Channel layer no disponible; no se notificó udid %s", udid)
+                        logger.warning("Channel layer no disponible; no se notificó udid %s", udid)
                 except Exception as e:
                     logger.exception("Error notificando WebSocket para udid %s: %s", udid, e)
 
@@ -507,9 +508,14 @@ class ListSubscribersWithUDIDView(APIView):
     def get(self, request):
         try:
             page_number = request.query_params.get('page', 1)
-            page_size = request.query_params.get('page_size', 10)
+            page_size = request.query_params.get('page_size', 20)
 
-            subscribers = SubscriberInfo.objects.all().order_by('subscriber_code')
+            subscribers = (
+                SubscriberInfo.objects
+                .filter(products__isnull=False)
+                .exclude(Q(products__exact='') | Q(products=[]))
+                .order_by('subscriber_code')
+            )
             paginator = Paginator(subscribers, page_size)
             page_obj = paginator.get_page(page_number)
 
@@ -521,7 +527,8 @@ class ListSubscribersWithUDIDView(APIView):
                     status__in=['validated','used', 'revoked']
                 ).order_by('-validated_at').first()
 
-                data.append({
+                # Construye el diccionario con todos los campos
+                full_data = {
                     # Campos del Subscriber
                     "subscriber_code": subscriber.subscriber_code,
                     "first_name": subscriber.first_name,
@@ -546,7 +553,12 @@ class ListSubscribersWithUDIDView(APIView):
                     "app_version": udid_info.app_version if udid_info else None,
                     "method": udid_info.method if udid_info else None,
                     "validated_by_operator": udid_info.validated_by_operator if udid_info else None,
-                })
+                }
+                
+                # Crea un nuevo diccionario excluyendo los campos con valores nulos, listas vacías, o strings vacíos.
+                clean_data = {key: value for key, value in full_data.items() if value is not None and value != [] and value != ''}
+                
+                data.append(clean_data)
 
             return Response({
                 "count": paginator.count,
