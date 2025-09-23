@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     'django_cron',
     'django_filters',
     "channels",
+    "django_crontab",
     'udid',
     
 ]
