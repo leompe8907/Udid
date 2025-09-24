@@ -49,7 +49,6 @@ INSTALLED_APPS = [
     'django_cron',
     'django_filters',
     "channels",
-    "django_crontab",
     'udid',
     
 ]
@@ -57,13 +56,7 @@ INSTALLED_APPS = [
 # Configuración de Channels
 ASGI_APPLICATION = 'server.asgi.application'
 
-# Channel layer con Redis
-CHANNEL_LAYERS = {
-    "default": {
-        "BACKEND": "channels_redis.core.RedisChannelLayer",
-        "CONFIG": {"hosts": [("127.0.0.1", 6379)]},
-    }
-}
+USE_REDIS = os.getenv("USE_REDIS", "0") == "1"
 
 # Tiempo máximo de espera del WS antes de responder "timeout" (segundos)
 UDID_WAIT_TIMEOUT = int(os.getenv("UDID_WAIT_TIMEOUT", "600"))  # 10 min
@@ -72,6 +65,20 @@ UDID_WAIT_TIMEOUT = int(os.getenv("UDID_WAIT_TIMEOUT", "600"))  # 10 min
 UDID_ENABLE_POLLING = os.getenv("UDID_ENABLE_POLLING", "0") == "1"
 UDID_POLL_INTERVAL = int(os.getenv("UDID_POLL_INTERVAL", "2"))
 
+# Channel layer con Redis
+if USE_REDIS:
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {"hosts": [("127.0.0.1", 6379)]},
+        }
+    }
+else:
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels.layers.InMemoryChannelLayer",
+        }
+    }
 
 
 MIDDLEWARE = [
