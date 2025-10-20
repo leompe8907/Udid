@@ -319,13 +319,19 @@ class AuthenticateWithUDIDView(APIView):
 class ValidateStatusUDIDView(APIView):
     permission_classes = [AllowAny]
 
-    def post(self, request):
-        udid = request.data.get('udid')
+    def get(self, request):
+        # ✅ Obtener UDID solo de query parameters o headers, NO del body
+        udid = request.query_params.get('udid') or request.META.get('HTTP_X_UDID')
         client_ip = get_client_ip(request)
+
 
         if not udid:
             return Response({
-                "error": "UDID is required"
+                "error": "UDID is required as query parameter or X-UDID header",
+                "usage_examples": {
+                    "query_param": "POST /validate/?udid=your_udid_here",
+                    "header": "X-UDID: your_udid_here"
+                }
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
@@ -389,9 +395,17 @@ class ValidateStatusUDIDView(APIView):
             "status": req.status,
             "subscriber_code": req.subscriber_code,
             "sn": req.sn,
-            "valid": req.is_valid(),
             "expiration": expiration_info
         }
+        
+        # ✅ Ajustar campo 'valid' según el estado
+        if req.status in ['validated', 'used']:
+            # Para estados validados o usados, el UDID es válido
+            response_data["valid"] = True
+        elif req.status == 'pending':
+            # Para pending, usar la lógica del modelo
+            response_data["valid"] = req.is_valid()
+        # Para 'expired' y 'revoked', omitir el campo 'valid' o usar False
 
         # ✅ Agregar información específica según el estado
         if req.status == 'validated':
