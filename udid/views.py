@@ -347,7 +347,7 @@ class ValidateStatusUDIDView(APIView):
             )
             return Response({
                 "error": "Invalid UDID"
-            }, status=status.HTTP_404_NOT_FOUND)
+            })
 
         # ✅ Verificar si está revocado
         if req.status == 'revoked':
@@ -363,7 +363,7 @@ class ValidateStatusUDIDView(APIView):
             return Response({
                 "error": "UDID has been revoked",
                 "status": "revoked"
-            }, status=status.HTTP_403_FORBIDDEN)
+            }, status=status.HTTP_202_ACCEPTED)
 
         # ✅ NUEVA: Verificar expiración usando la nueva lógica
         if req.is_expired():
